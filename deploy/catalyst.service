@@ -1,0 +1,26 @@
+[Unit]
+Description=Stock Catalyst Catcher (Telegram pre-market gap scanner)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=catalyst
+Group=catalyst
+WorkingDirectory=/opt/stock-catalyst-catcher
+EnvironmentFile=/etc/catalyst.env
+ExecStart=/opt/stock-catalyst-catcher/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/stock-catalyst-catcher
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
