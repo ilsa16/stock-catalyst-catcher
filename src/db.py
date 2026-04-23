@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS api_credits (
     day            TEXT PRIMARY KEY,
     credits_used   INTEGER DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    chat_id        INTEGER NOT NULL,
+    ticker         TEXT    NOT NULL,
+    company_name   TEXT,
+    added_at       TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, ticker)
+);
 """
 
 
@@ -241,3 +249,37 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
         return int(row["credits_used"]) if row else 0
+
+    # ---------- watchlist ----------
+
+    async def add_watch(self, chat_id: int, ticker: str, company_name: str | None) -> bool:
+        """Insert or replace. Returns True if the row was new."""
+        async with self.conn.execute(
+            "SELECT 1 FROM watchlist WHERE chat_id=? AND ticker=?", (chat_id, ticker)
+        ) as cur:
+            existed = await cur.fetchone() is not None
+        await self.conn.execute(
+            """
+            INSERT INTO watchlist (chat_id, ticker, company_name, added_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id, ticker) DO UPDATE SET
+                company_name = excluded.company_name
+            """,
+            (chat_id, ticker, company_name, utc_now_iso()),
+        )
+        await self.conn.commit()
+        return not existed
+
+    async def remove_watch(self, chat_id: int, ticker: str) -> bool:
+        cur = await self.conn.execute(
+            "DELETE FROM watchlist WHERE chat_id=? AND ticker=?", (chat_id, ticker)
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def list_watch(self, chat_id: int) -> list[aiosqlite.Row]:
+        async with self.conn.execute(
+            "SELECT ticker, company_name FROM watchlist WHERE chat_id=? ORDER BY ticker",
+            (chat_id,),
+        ) as cur:
+            return list(await cur.fetchall())

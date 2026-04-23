@@ -139,6 +139,23 @@ class EODHDClient:
             return [data]
         return []
 
+    async def search(self, query: str) -> list[dict[str, Any]]:
+        """
+        EODHD symbol search. Returns up-to-`limit` matches with Code/Name/Exchange fields.
+        Used to resolve a user-entered ticker to a canonical name.
+        """
+        try:
+            data = await self._request(
+                f"/search/{query}",
+                params={"limit": 10},
+                cost=1,
+                essential=False,
+            )
+        except CreditCapExceeded:
+            log.info("search skipped for %s: credit cap", query)
+            return []
+        return list(data) if isinstance(data, list) else []
+
     async def top_news(self, ticker: str) -> dict[str, Any] | None:
         """Single most recent news item for a ticker. Non-essential (gated above 80%)."""
         try:

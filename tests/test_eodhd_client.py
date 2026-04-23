@@ -72,6 +72,37 @@ async def test_credit_cap_blocks_nonessential_at_80pct(client, db):
 
 
 @pytest.mark.asyncio
+async def test_search_returns_match_list(client, db):
+    with respx.mock() as mock:
+        mock.get(f"{BASE_URL}/search/AAPL").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"Code": "AAPL", "Name": "Apple Inc", "Exchange": "NASDAQ"},
+                    {"Code": "AAPLW", "Name": "Apple Warrants"},
+                ],
+            )
+        )
+        rows = await client.search("AAPL")
+    assert len(rows) == 2
+    assert rows[0]["Code"] == "AAPL"
+    assert await db.credits_used_today() == 1
+
+
+@pytest.mark.asyncio
+async def test_search_gated_as_nonessential(client, db):
+    # 80% of 1000 = 800. Use 800 exactly; a 1-credit search pushes to 801 → blocked.
+    await db.add_credits(800)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(f"{BASE_URL}/search/AAPL").mock(
+            return_value=httpx.Response(200, json=[{"Code": "AAPL"}])
+        )
+        result = await client.search("AAPL")
+    assert result == []
+    assert await db.credits_used_today() == 800
+
+
+@pytest.mark.asyncio
 async def test_screener_returns_data_list(client):
     with respx.mock() as mock:
         mock.get(f"{BASE_URL}/screener").mock(

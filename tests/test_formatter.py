@@ -5,6 +5,7 @@ from src.formatter import (
     TELEGRAM_MAX_MESSAGE,
     escape_md_v2,
     render_digest,
+    render_portfolio,
     tradingview_url,
 )
 from src.scanner import GapHit
@@ -45,6 +46,52 @@ def test_render_digest_chunks_when_huge():
     when = datetime(2026, 4, 22, 11, 30, tzinfo=ZoneInfo("Europe/Nicosia"))
     hits = [_hit(f"T{i:04d}.US", 5.5 + (i % 5)) for i in range(2000)]
     chunks = render_digest(hits, threshold=5.0, universe_size=5000, scan_time_local=when)
+    assert len(chunks) >= 2
+    for chunk in chunks:
+        assert len(chunk) <= TELEGRAM_MAX_MESSAGE
+
+
+def test_render_portfolio_empty_prompts_user():
+    chunks = render_portfolio([])
+    assert len(chunks) == 1
+    assert "empty" in chunks[0].lower()
+    assert "/watch" in chunks[0]
+
+
+def test_render_portfolio_shows_ticker_name_price():
+    rows = [
+        {"ticker": "AAPL.US", "company_name": "Apple Inc", "price": 189.42},
+        {"ticker": "MSFT.US", "company_name": "Microsoft Corp", "price": 412.07},
+    ]
+    chunks = render_portfolio(rows)
+    text = "\n".join(chunks)
+    assert "*AAPL*" in text
+    assert escape_md_v2("Apple Inc") in text
+    assert escape_md_v2("$189.42") in text
+    assert "*MSFT*" in text
+    assert escape_md_v2("$412.07") in text
+
+
+def test_render_portfolio_missing_price_shows_dash():
+    rows = [{"ticker": "XYZ.US", "company_name": "XYZ Corp", "price": None}]
+    chunks = render_portfolio(rows)
+    text = "\n".join(chunks)
+    assert "*XYZ*" in text
+    assert "@ —" in text
+
+
+def test_render_portfolio_missing_name_shows_dash():
+    rows = [{"ticker": "XYZ.US", "company_name": None, "price": 10.0}]
+    chunks = render_portfolio(rows)
+    assert "— — @" in chunks[0]
+
+
+def test_render_portfolio_chunks_when_huge():
+    rows = [
+        {"ticker": f"T{i:04d}.US", "company_name": "X" * 100, "price": 12.34}
+        for i in range(2000)
+    ]
+    chunks = render_portfolio(rows)
     assert len(chunks) >= 2
     for chunk in chunks:
         assert len(chunk) <= TELEGRAM_MAX_MESSAGE

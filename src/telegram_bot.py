@@ -15,9 +15,30 @@ from config import Settings
 
 from .db import Database
 from .eodhd_client import EODHDClient
-from .formatter import escape_md_v2, render_status
+from .formatter import escape_md_v2, render_portfolio, render_status
 from .jobs import daily_scan
 from .scheduler import JOB_ID
+
+
+def _normalize_ticker(raw: str) -> str:
+    raw = raw.strip().upper()
+    if "." not in raw:
+        raw = f"{raw}.US"
+    return raw
+
+
+async def _resolve_company_name(client: EODHDClient, ticker: str) -> str | None:
+    """Best-effort name lookup: exact Code match wins; otherwise first hit."""
+    bare = ticker.split(".")[0]
+    matches = await client.search(bare)
+    if not matches:
+        return None
+    for m in matches:
+        code = (m.get("Code") or m.get("code") or "").upper()
+        if code == bare:
+            return m.get("Name") or m.get("name")
+    first = matches[0]
+    return first.get("Name") or first.get("name")
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +52,9 @@ HELP_TEXT = (
     "/run\\_now — trigger an ad\\-hoc scan \\(rate\\-limited\\)\n"
     "/newson — attach top news headline to each hit\n"
     "/newsoff — disable news lookup\n"
+    "/watch `TICKER` \\[`TICKER` \\.\\.\\.\\] — add to your watchlist\n"
+    "/unwatch `TICKER` \\[`TICKER` \\.\\.\\.\\] — remove from your watchlist\n"
+    "/portfolio — show watchlist with last price\n"
     "/help — this help"
 )
 
@@ -160,6 +184,105 @@ def build_telegram_app(
         else:
             await msg.reply_text(f"Scan failed: {result.get('error', 'unknown')[:300]}")
 
+    async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        chat = update.effective_chat
+        if msg is None or chat is None:
+            return
+        args = ctx.args or []
+        if not args:
+            await msg.reply_text("Usage: /watch TICKER [TICKER ...]")
+            return
+
+        added, updated, failed = [], [], []
+        for raw in args:
+            ticker = _normalize_ticker(raw)
+            try:
+                name = await _resolve_company_name(client, ticker)
+            except Exception as e:
+                log.exception("search failed for %s: %s", ticker, e)
+                failed.append(ticker.split(".")[0])
+                continue
+            if name is None:
+                failed.append(ticker.split(".")[0])
+                continue
+            was_new = await db.add_watch(chat.id, ticker, name)
+            (added if was_new else updated).append(f"{ticker.split('.')[0]} ({name})")
+
+        lines = []
+        if added:
+            lines.append("Added: " + ", ".join(added))
+        if updated:
+            lines.append("Already tracked: " + ", ".join(updated))
+        if failed:
+            lines.append("Couldn't resolve: " + ", ".join(failed))
+        await msg.reply_text("\n".join(lines) or "Nothing changed.")
+
+    async def cmd_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        chat = update.effective_chat
+        if msg is None or chat is None:
+            return
+        args = ctx.args or []
+        if not args:
+            await msg.reply_text("Usage: /unwatch TICKER [TICKER ...]")
+            return
+
+        removed, missing = [], []
+        for raw in args:
+            ticker = _normalize_ticker(raw)
+            if await db.remove_watch(chat.id, ticker):
+                removed.append(ticker.split(".")[0])
+            else:
+                missing.append(ticker.split(".")[0])
+
+        lines = []
+        if removed:
+            lines.append("Removed: " + ", ".join(removed))
+        if missing:
+            lines.append("Not on watchlist: " + ", ".join(missing))
+        await msg.reply_text("\n".join(lines) or "Nothing changed.")
+
+    async def cmd_portfolio(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        chat = update.effective_chat
+        if msg is None or chat is None:
+            return
+
+        rows = await db.list_watch(chat.id)
+        if not rows:
+            for chunk in render_portfolio([]):
+                await msg.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+            return
+
+        tickers = [r["ticker"] for r in rows]
+        try:
+            quotes = await client.live_batch(tickers)
+        except Exception as e:
+            log.exception("portfolio quote fetch failed: %s", e)
+            quotes = []
+
+        price_by_ticker: dict[str, float] = {}
+        for q in quotes:
+            code = (q.get("code") or q.get("Code") or "").upper()
+            try:
+                price = float(q.get("close")) if q.get("close") not in (None, "NA") else None
+            except (TypeError, ValueError):
+                price = None
+            if code and price is not None:
+                price_by_ticker[code] = price
+
+        payload = [
+            {
+                "ticker": r["ticker"],
+                "company_name": r["company_name"],
+                "price": price_by_ticker.get(r["ticker"]),
+            }
+            for r in rows
+        ]
+        for chunk in render_portfolio(payload):
+            await msg.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -167,4 +290,7 @@ def build_telegram_app(
     app.add_handler(CommandHandler("run_now", cmd_run_now))
     app.add_handler(CommandHandler("newson", cmd_news_on))
     app.add_handler(CommandHandler("newsoff", cmd_news_off))
+    app.add_handler(CommandHandler("watch", cmd_watch))
+    app.add_handler(CommandHandler("unwatch", cmd_unwatch))
+    app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     return app
