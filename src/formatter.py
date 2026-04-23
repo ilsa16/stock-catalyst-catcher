@@ -77,6 +77,39 @@ def render_digest(
     return chunks
 
 
+def render_portfolio(rows: list[dict]) -> list[str]:
+    """
+    Build MarkdownV2 messages for /portfolio. Each row: {ticker, company_name, price}.
+    `price` may be None when the quote is unavailable. Splits across messages at 4096.
+    """
+    if not rows:
+        return [
+            "*Your watchlist is empty*\n"
+            + escape_md_v2("Use /watch TICKER [TICKER ...] to add.")
+        ]
+
+    header = "*Your watchlist*"
+    chunks: list[str] = []
+    current = header
+    for r in rows:
+        sym = r["ticker"].split(".")[0]
+        name = r.get("company_name") or "—"
+        price = r.get("price")
+        price_str = f"${price:,.2f}" if price is not None else "—"
+        line = (
+            f"• *{escape_md_v2(sym)}* — {escape_md_v2(name)} "
+            f"@ {escape_md_v2(price_str)}"
+        )
+        candidate = f"{current}\n{line}"
+        if len(candidate) > TELEGRAM_MAX_MESSAGE:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    chunks.append(current)
+    return chunks
+
+
 def render_status(
     *,
     subscribed: bool,
