@@ -38,18 +38,20 @@ async def run() -> None:
     client = EODHDClient(http, settings.eodhd_api_key, db, settings.eodhd_daily_credit_cap)
 
     scheduler_ref: dict = {"sched": None}
-    app = build_telegram_app(settings, db, client, scheduler_ref)
+    app = build_telegram_app(settings, db, client, http, scheduler_ref)
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    sched = build_scheduler(db, client, app.bot, settings)
+    sched = build_scheduler(db, client, http, app.bot, settings)
     sched.start()
     scheduler_ref["sched"] = sched
     log.info(
-        "scheduler armed for %02d:%02d %s",
-        settings.scan_hour, settings.scan_minute, settings.scan_timezone,
+        "scheduler armed: premarket %02d:%02d, postmarket %02d:%02d %s (mon-fri)",
+        settings.scan_hour, settings.scan_minute,
+        settings.post_scan_hour, settings.post_scan_minute,
+        settings.scan_timezone,
     )
 
     stop_event = asyncio.Event()
