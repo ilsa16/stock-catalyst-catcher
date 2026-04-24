@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     scan_minute: int = 30
     scan_timezone: str = "Europe/Nicosia"
 
+    # Post-market scan: ~23:30 Europe/Nicosia = ~16:30 ET, ~30 min after US close,
+    # long enough for most after-hours earnings prints to land.
+    post_scan_hour: int = 23
+    post_scan_minute: int = 30
+
     override_universe: str = ""
 
     log_level: str = "INFO"

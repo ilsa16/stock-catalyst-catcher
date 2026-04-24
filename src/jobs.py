@@ -5,6 +5,7 @@ import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import httpx
 from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, TelegramError
@@ -15,7 +16,7 @@ from .db import Database
 from .eodhd_client import EODHDClient
 from .formatter import render_digest
 from .scanner import GapHit, scan_universe
-from .universe import ensure_universe
+from .universe import resolve_union_for_users, resolve_user_universe
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +26,6 @@ async def _send_digest_to(
     chat_id: int,
     chunks: list[str],
 ) -> list[int]:
-    """Send each chunk; return Telegram message IDs (one per chunk)."""
     ids: list[int] = []
     for chunk in chunks:
         msg = await bot.send_message(
@@ -52,60 +52,82 @@ async def _maybe_load_news(
 async def daily_scan(
     db: Database,
     client: EODHDClient,
+    http: httpx.AsyncClient,
     bot: Bot,
     settings: Settings,
     *,
+    scan_type: str = "premarket",
     only_chat_id: int | None = None,
 ) -> dict:
     """
-    The full scan + fan-out. When `only_chat_id` is set (used by /run_now), the
-    digest is sent only to that user — but we still record the run.
+    Resolve the union of subscribed users' universes, quote it once, filter per
+    user, and fan out MarkdownV2 digests.
 
-    Returns a dict summary suitable for logging / direct reply.
+    scan_type selects which opt-in flag filters the user list ('premarket' or
+    'postmarket'). For `only_chat_id` (from /run_now) we ignore the opt-in filter
+    and scan just that user's universe.
     """
-    job_id = await db.start_job_run()
+    job_id = await db.start_job_run(scan_type=scan_type)
     universe_size = 0
     hits_count = 0
     status = "ok"
     err: str | None = None
     try:
-        tickers = await ensure_universe(
-            db,
-            client,
-            override=settings.override_tickers or None,
-            market_cap_min=settings.universe_market_cap_min,
-            price_min=settings.universe_price_min,
-            avg_vol_min=settings.universe_avg_vol_min,
-        )
+        if only_chat_id is not None:
+            user = await db.get_user(only_chat_id)
+            users = [user] if user is not None else []
+        else:
+            users = await db.list_subscribed_users(scan_type=scan_type)
+
+        if not users:
+            log.info("no subscribed users for %s; nothing to do", scan_type)
+            return {
+                "job_run_id": job_id,
+                "universe_size": 0,
+                "hits_count": 0,
+                "status": "ok",
+                "error": None,
+            }
+
+        tickers = await resolve_union_for_users(db, client, http, users)
         universe_size = len(tickers)
 
-        hits = await scan_universe(client, tickers)
+        hits: list[GapHit] = await scan_universe(client, tickers) if tickers else []
         hits_count = len(hits)
+        hits_by_ticker: dict[str, GapHit] = {h.ticker: h for h in hits}
 
-        users = await db.list_subscribed_users()
-        if only_chat_id is not None:
-            users = [u for u in users if u["chat_id"] == only_chat_id]
-
-        # Decide which tickers will be sent to a news-enabled user; only fetch news for those.
+        # Fetch news only for tickers that will be shown to at least one news-enabled user.
         news_needed: set[str] = set()
+        per_user_hits: list[tuple[dict, list[GapHit]]] = []
         for user in users:
-            if not user["news_enabled"]:
-                continue
-            user_hits = [h for h in hits if h.gap_pct >= user["gap_threshold"]]
-            news_needed.update(h.ticker for h in user_hits)
+            user_universe = set(
+                await resolve_user_universe(
+                    db, client, http,
+                    choice=user["universe_choice"],
+                    tier=user["screener_tier"],
+                    chat_id=user["chat_id"],
+                )
+            )
+            user_hits = [
+                h for h in hits
+                if h.ticker in user_universe and h.gap_pct >= user["gap_threshold"]
+            ]
+            per_user_hits.append((user, user_hits))
+            if user["news_enabled"]:
+                news_needed.update(h.ticker for h in user_hits)
 
         news_by_ticker = await _maybe_load_news(client, news_needed) if news_needed else {}
 
         tz = ZoneInfo(settings.scan_timezone)
         scan_local = datetime.now(tz)
 
-        for user in users:
-            user_hits: list[GapHit] = [h for h in hits if h.gap_pct >= user["gap_threshold"]]
+        for user, user_hits in per_user_hits:
             chunks = render_digest(
                 user_hits,
                 threshold=user["gap_threshold"],
                 universe_size=universe_size,
                 scan_time_local=scan_local,
+                scan_type=scan_type,
                 news_by_ticker={t: news_by_ticker.get(t) for t in (h.ticker for h in user_hits)},
             )
             try:

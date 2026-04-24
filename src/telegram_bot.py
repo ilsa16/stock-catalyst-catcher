@@ -6,10 +6,17 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
 
 from config import Settings
 
@@ -17,7 +24,33 @@ from .db import Database
 from .eodhd_client import EODHDClient
 from .formatter import escape_md_v2, render_portfolio, render_status
 from .jobs import daily_scan
-from .scheduler import JOB_ID
+from .scheduler import POSTMARKET_JOB_ID, PREMARKET_JOB_ID
+from .universe import (
+    SCREENER_TIERS,
+    UNIVERSE_CUSTOM,
+    UNIVERSE_LABELS,
+)
+
+log = logging.getLogger(__name__)
+
+RUN_NOW_COOLDOWN_SECONDS = 5 * 60
+
+THRESHOLD_CHOICES: list[float] = [3.0, 5.0, 7.0, 10.0, 15.0]
+
+HELP_TEXT = (
+    "*Catalyst Catcher*\n"
+    "/start — subscribe and see defaults\n"
+    "/stop — pause alerts\n"
+    "/status — show all your settings\n"
+    "/universe — pick which stocks to scan\n"
+    "/screener — tune the custom screener filters\n"
+    "/threshold — set the gap % floor\n"
+    "/frequency — pick pre\\-market / post\\-market\n"
+    "/newson /newsoff — attach a news link per hit\n"
+    "/watch /unwatch /portfolio — manage your watchlist\n"
+    "/run\\_now — trigger a scan now \\(rate\\-limited\\)\n"
+    "/help — this help"
+)
 
 
 def _normalize_ticker(raw: str) -> str:
@@ -28,7 +61,6 @@ def _normalize_ticker(raw: str) -> str:
 
 
 async def _resolve_company_name(client: EODHDClient, ticker: str) -> str | None:
-    """Best-effort name lookup: exact Code match wins; otherwise first hit."""
     bare = ticker.split(".")[0]
     matches = await client.search(bare)
     if not matches:
@@ -40,40 +72,109 @@ async def _resolve_company_name(client: EODHDClient, ticker: str) -> str | None:
     first = matches[0]
     return first.get("Name") or first.get("name")
 
-log = logging.getLogger(__name__)
 
-RUN_NOW_COOLDOWN_SECONDS = 5 * 60
+# ---------- keyboard builders ----------
 
-HELP_TEXT = (
-    "*Catalyst Catcher*\n"
-    "/start — subscribe\n"
-    "/stop — pause alerts\n"
-    "/status — show prefs and next scheduled run\n"
-    "/run\\_now — trigger an ad\\-hoc scan \\(rate\\-limited\\)\n"
-    "/newson — attach top news headline to each hit\n"
-    "/newsoff — disable news lookup\n"
-    "/watch `TICKER` \\[`TICKER` \\.\\.\\.\\] — add to your watchlist\n"
-    "/unwatch `TICKER` \\[`TICKER` \\.\\.\\.\\] — remove from your watchlist\n"
-    "/portfolio — show watchlist with last price\n"
-    "/help — this help"
-)
+def _universe_keyboard(current: str) -> InlineKeyboardMarkup:
+    def b(key: str, label: str) -> InlineKeyboardButton:
+        marker = "✅ " if key == current else ""
+        return InlineKeyboardButton(f"{marker}{label}", callback_data=f"univ:{key}")
+
+    rows = [
+        [b("all_indices", "All indices")],
+        [b("sp500", "S&P 500"), b("ndx", "NASDAQ-100")],
+        [b("dj30", "Dow 30"), b("custom", "Custom screener")],
+        [b("watchlist", "My watchlist")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _screener_keyboard(current: str) -> InlineKeyboardMarkup:
+    def b(key: str) -> InlineKeyboardButton:
+        marker = "✅ " if key == current else ""
+        label = SCREENER_TIERS[key]["label"]
+        return InlineKeyboardButton(f"{marker}{label}", callback_data=f"tier:{key}")
+
+    rows = [[b(k)] for k in ("default", "large_cap", "broad", "penny_friendly")]
+    return InlineKeyboardMarkup(rows)
+
+
+def _threshold_keyboard(current: float) -> InlineKeyboardMarkup:
+    def b(val: float) -> InlineKeyboardButton:
+        marker = "✅ " if abs(val - current) < 0.01 else ""
+        return InlineKeyboardButton(f"{marker}{val:g}%", callback_data=f"thr:{val}")
+
+    return InlineKeyboardMarkup([[b(v) for v in THRESHOLD_CHOICES]])
+
+
+def _frequency_keyboard(pre_on: bool, post_on: bool) -> InlineKeyboardMarkup:
+    pre_label = ("✅" if pre_on else "⬜") + " Pre-market (11:30 Nicosia / 04:30 ET)"
+    post_label = ("✅" if post_on else "⬜") + " Post-market (23:30 Nicosia / 16:30 ET)"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(pre_label, callback_data="freq:premarket")],
+        [InlineKeyboardButton(post_label, callback_data="freq:postmarket")],
+    ])
+
+
+# ---------- panel renderers ----------
+
+def _universe_text(current: str) -> str:
+    return (
+        "*Universe*\n"
+        f"Current: {escape_md_v2(UNIVERSE_LABELS[current])}\n"
+        "Tap an option to change:"
+    )
+
+
+def _screener_text(current: str) -> str:
+    return (
+        "*Custom screener tier*\n"
+        f"Current: {escape_md_v2(SCREENER_TIERS[current]['label'])}\n"
+        "_Used when your universe is set to Custom screener\\._\n"
+        "Tap an option to change:"
+    )
+
+
+def _threshold_text(current: float) -> str:
+    return (
+        "*Gap threshold*\n"
+        f"Current: ≥ {escape_md_v2(f'{current:.1f}%')}\n"
+        "Tap an option to change:"
+    )
+
+
+def _frequency_text(pre_on: bool, post_on: bool) -> str:
+    return (
+        "*Scan frequency*\n"
+        f"Pre\\-market: {'on' if pre_on else 'off'}\n"
+        f"Post\\-market: {'on' if post_on else 'off'}\n"
+        "Tap a row to toggle:"
+    )
 
 
 def build_telegram_app(
     settings: Settings,
     db: Database,
     client: EODHDClient,
+    http: httpx.AsyncClient,
     scheduler_ref: dict,
 ) -> Application:
     """
     `scheduler_ref` is a one-key dict {"sched": AsyncIOScheduler|None} populated by
-    main() after scheduler.start(). We pass a ref because the bot is built before
-    the scheduler so the bot can hand its `Bot` instance to the scheduled job.
+    main() after scheduler.start(). The bot is built before the scheduler so the
+    bot can hand its `Bot` instance to the scheduled jobs.
     """
     app = ApplicationBuilder().token(settings.telegram_bot_token).build()
 
     last_run_now: dict[int, float] = {}
     run_now_lock = asyncio.Lock()
+
+    async def _ensure_user(chat_id: int, username: str | None) -> None:
+        await db.upsert_user(
+            chat_id=chat_id,
+            username=username,
+            default_threshold=settings.default_gap_threshold,
+        )
 
     async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -81,16 +182,25 @@ def build_telegram_app(
         user = update.effective_user
         if msg is None or chat is None:
             return
-        await db.upsert_user(
-            chat_id=chat.id,
-            username=(user.username if user else None),
-            default_threshold=settings.default_gap_threshold,
+        await _ensure_user(chat.id, user.username if user else None)
+        row = await db.get_user(chat.id)
+        assert row is not None
+
+        universe_label = escape_md_v2(UNIVERSE_LABELS[row["universe_choice"]])
+        threshold_str = escape_md_v2(f"{row['gap_threshold']:.1f}%")
+        pre_part = "pre\\-market" if row["premarket_enabled"] else "off"
+        post_part = " \\+ post\\-market" if row["postmarket_enabled"] else ""
+        text = (
+            "*Welcome to Catalyst Catcher*\n"
+            "You're subscribed with defaults:\n"
+            f"• Universe: {universe_label}\n"
+            f"• Threshold: ≥ {threshold_str}\n"
+            f"• Schedule: {pre_part}{post_part}\n\n"
+            "Customize any time:\n"
+            "/universe /screener /threshold /frequency\n"
+            "Manage a personal list with /watch and /portfolio\\."
         )
-        await msg.reply_text(
-            "Subscribed. You'll get a digest every weekday at "
-            f"{settings.scan_hour:02d}:{settings.scan_minute:02d} {settings.scan_timezone}.\n"
-            "Use /help to see commands."
-        )
+        await msg.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
     async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -127,62 +237,175 @@ def build_telegram_app(
         chat = update.effective_chat
         if msg is None or chat is None:
             return
-        user = await db.get_user(chat.id)
-        if user is None:
+        user_row = await db.get_user(chat.id)
+        if user_row is None:
             await msg.reply_text("Not subscribed. /start to subscribe.")
             return
 
-        next_run_local: datetime | None = None
+        tz = ZoneInfo(settings.scan_timezone)
         sched: AsyncIOScheduler | None = scheduler_ref.get("sched")
+        next_pre: datetime | None = None
+        next_post: datetime | None = None
         if sched is not None:
-            job = sched.get_job(JOB_ID)
+            job = sched.get_job(PREMARKET_JOB_ID)
             if job is not None and job.next_run_time is not None:
-                next_run_local = job.next_run_time.astimezone(ZoneInfo(settings.scan_timezone))
+                next_pre = job.next_run_time.astimezone(tz)
+            job = sched.get_job(POSTMARKET_JOB_ID)
+            if job is not None and job.next_run_time is not None:
+                next_post = job.next_run_time.astimezone(tz)
 
         last = await db.latest_job_run()
+        choice = user_row["universe_choice"]
+        tier_label = (
+            SCREENER_TIERS[user_row["screener_tier"]]["label"]
+            if choice == UNIVERSE_CUSTOM else None
+        )
         text = render_status(
-            subscribed=bool(user["subscribed"]),
-            threshold=float(user["gap_threshold"]),
-            news_enabled=bool(user["news_enabled"]),
-            next_run_local=next_run_local,
+            subscribed=bool(user_row["subscribed"]),
+            threshold=float(user_row["gap_threshold"]),
+            news_enabled=bool(user_row["news_enabled"]),
+            universe_label=UNIVERSE_LABELS[choice],
+            tier_label=tier_label,
+            premarket_enabled=bool(user_row["premarket_enabled"]),
+            postmarket_enabled=bool(user_row["postmarket_enabled"]),
+            next_premarket_local=next_pre,
+            next_postmarket_local=next_post,
             last_run=dict(last) if last else None,
         )
         await msg.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
-    async def cmd_run_now(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def cmd_universe(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
         chat = update.effective_chat
+        user = update.effective_user
         if msg is None or chat is None:
             return
+        await _ensure_user(chat.id, user.username if user else None)
+        row = await db.get_user(chat.id)
+        assert row is not None
+        await msg.reply_text(
+            _universe_text(row["universe_choice"]),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_universe_keyboard(row["universe_choice"]),
+        )
 
-        # Cooldown per chat
-        now = time.monotonic()
-        prev = last_run_now.get(chat.id, 0.0)
-        wait = RUN_NOW_COOLDOWN_SECONDS - (now - prev)
-        if wait > 0:
-            await msg.reply_text(f"Slow down — try again in {int(wait)}s.")
+    async def cmd_screener(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None:
             return
-        last_run_now[chat.id] = now
+        await _ensure_user(chat.id, user.username if user else None)
+        row = await db.get_user(chat.id)
+        assert row is not None
+        await msg.reply_text(
+            _screener_text(row["screener_tier"]),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_screener_keyboard(row["screener_tier"]),
+        )
 
-        # Make sure user is registered before we send to them
-        user = await db.get_user(chat.id)
-        if user is None or not user["subscribed"]:
-            await db.upsert_user(
-                chat_id=chat.id,
-                username=(update.effective_user.username if update.effective_user else None),
-                default_threshold=settings.default_gap_threshold,
-            )
+    async def cmd_threshold(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None:
+            return
+        await _ensure_user(chat.id, user.username if user else None)
+        row = await db.get_user(chat.id)
+        assert row is not None
+        await msg.reply_text(
+            _threshold_text(float(row["gap_threshold"])),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_threshold_keyboard(float(row["gap_threshold"])),
+        )
 
-        await msg.reply_text("Scanning now…")
-        async with run_now_lock:
-            result = await daily_scan(db, client, app.bot, settings, only_chat_id=chat.id)
-        if result["status"] == "ok":
-            note = escape_md_v2(
-                f"Done. {result['hits_count']} hits / {result['universe_size']} universe."
-            )
-            await msg.reply_text(note, parse_mode=ParseMode.MARKDOWN_V2)
-        else:
-            await msg.reply_text(f"Scan failed: {result.get('error', 'unknown')[:300]}")
+    async def cmd_frequency(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None:
+            return
+        await _ensure_user(chat.id, user.username if user else None)
+        row = await db.get_user(chat.id)
+        assert row is not None
+        pre_on = bool(row["premarket_enabled"])
+        post_on = bool(row["postmarket_enabled"])
+        await msg.reply_text(
+            _frequency_text(pre_on, post_on),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_frequency_keyboard(pre_on, post_on),
+        )
+
+    async def on_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        q = update.callback_query
+        if q is None or q.data is None or q.message is None:
+            return
+        chat_id = q.message.chat.id
+        data = q.data
+        try:
+            prefix, _, value = data.partition(":")
+            if prefix == "univ":
+                if value not in UNIVERSE_LABELS:
+                    await q.answer("Unknown option")
+                    return
+                await db.set_universe_choice(chat_id, value)
+                await q.answer(f"Universe: {UNIVERSE_LABELS[value]}")
+                await q.edit_message_text(
+                    _universe_text(value),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=_universe_keyboard(value),
+                )
+            elif prefix == "tier":
+                if value not in SCREENER_TIERS:
+                    await q.answer("Unknown tier")
+                    return
+                await db.set_screener_tier(chat_id, value)
+                await q.answer(f"Tier: {value.replace('_', ' ')}")
+                await q.edit_message_text(
+                    _screener_text(value),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=_screener_keyboard(value),
+                )
+            elif prefix == "thr":
+                try:
+                    threshold = float(value)
+                except ValueError:
+                    await q.answer("Bad threshold")
+                    return
+                await db.set_threshold(chat_id, threshold)
+                await q.answer(f"Threshold: {threshold:g}%")
+                await q.edit_message_text(
+                    _threshold_text(threshold),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=_threshold_keyboard(threshold),
+                )
+            elif prefix == "freq":
+                if value not in ("premarket", "postmarket"):
+                    await q.answer("Unknown slot")
+                    return
+                row = await db.get_user(chat_id)
+                if row is None:
+                    await q.answer("Not subscribed")
+                    return
+                col = "premarket_enabled" if value == "premarket" else "postmarket_enabled"
+                new_state = not bool(row[col])
+                await db.set_scan_enabled(chat_id, value, new_state)
+                pre_on = new_state if value == "premarket" else bool(row["premarket_enabled"])
+                post_on = new_state if value == "postmarket" else bool(row["postmarket_enabled"])
+                await q.answer(f"{value}: {'on' if new_state else 'off'}")
+                await q.edit_message_text(
+                    _frequency_text(pre_on, post_on),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=_frequency_keyboard(pre_on, post_on),
+                )
+            else:
+                await q.answer()
+        except Exception as e:
+            log.exception("callback handler error: %s", e)
+            try:
+                await q.answer("Something went wrong — try again.")
+            except Exception:
+                pass
 
     async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -283,6 +506,41 @@ def build_telegram_app(
         for chunk in render_portfolio(payload):
             await msg.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
 
+    async def cmd_run_now(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        chat = update.effective_chat
+        if msg is None or chat is None:
+            return
+
+        now = time.monotonic()
+        prev = last_run_now.get(chat.id, 0.0)
+        wait = RUN_NOW_COOLDOWN_SECONDS - (now - prev)
+        if wait > 0:
+            await msg.reply_text(f"Slow down — try again in {int(wait)}s.")
+            return
+        last_run_now[chat.id] = now
+
+        user = await db.get_user(chat.id)
+        if user is None or not user["subscribed"]:
+            await _ensure_user(
+                chat.id,
+                update.effective_user.username if update.effective_user else None,
+            )
+
+        await msg.reply_text("Scanning now…")
+        async with run_now_lock:
+            result = await daily_scan(
+                db, client, http, app.bot, settings,
+                scan_type="premarket", only_chat_id=chat.id,
+            )
+        if result["status"] == "ok":
+            note = escape_md_v2(
+                f"Done. {result['hits_count']} hits / {result['universe_size']} universe."
+            )
+            await msg.reply_text(note, parse_mode=ParseMode.MARKDOWN_V2)
+        else:
+            await msg.reply_text(f"Scan failed: {result.get('error', 'unknown')[:300]}")
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -293,4 +551,9 @@ def build_telegram_app(
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
+    app.add_handler(CommandHandler("universe", cmd_universe))
+    app.add_handler(CommandHandler("screener", cmd_screener))
+    app.add_handler(CommandHandler("threshold", cmd_threshold))
+    app.add_handler(CommandHandler("frequency", cmd_frequency))
+    app.add_handler(CallbackQueryHandler(on_callback))
     return app

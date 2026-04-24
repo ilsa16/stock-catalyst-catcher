@@ -38,12 +38,19 @@ def _fmt_hit_line(hit: GapHit, news_url: str | None) -> str:
     return line
 
 
+_SCAN_LABELS = {
+    "premarket": "Pre-market gaps",
+    "postmarket": "Post-market gaps",
+}
+
+
 def render_digest(
     hits: list[GapHit],
     *,
     threshold: float,
     universe_size: int,
     scan_time_local: datetime,
+    scan_type: str = "premarket",
     news_by_ticker: dict[str, str | None] | None = None,
 ) -> list[str]:
     """
@@ -53,7 +60,8 @@ def render_digest(
     news_by_ticker = news_by_ticker or {}
     threshold_str = escape_md_v2(f"{threshold:.1f}%")
     when = escape_md_v2(scan_time_local.strftime("%Y-%m-%d %H:%M %Z"))
-    header = f"*Pre\\-market gaps ≥ {threshold_str}* — _{when}_"
+    label = escape_md_v2(_SCAN_LABELS.get(scan_type, "Gaps"))
+    header = f"*{label} ≥ {threshold_str}* — _{when}_"
 
     if not hits:
         body = escape_md_v2(f"No tickers above threshold (universe size {universe_size}).")
@@ -115,25 +123,44 @@ def render_status(
     subscribed: bool,
     threshold: float,
     news_enabled: bool,
-    next_run_local: datetime | None,
+    universe_label: str,
+    tier_label: str | None,
+    premarket_enabled: bool,
+    postmarket_enabled: bool,
+    next_premarket_local: datetime | None,
+    next_postmarket_local: datetime | None,
     last_run: dict | None,
 ) -> str:
     lines = [
         "*Catalyst Catcher status*",
         f"Subscribed: {'yes' if subscribed else 'no'}",
+        f"Universe: {escape_md_v2(universe_label)}",
+    ]
+    if tier_label:
+        lines.append(f"Screener tier: {escape_md_v2(tier_label)}")
+    lines.extend([
         f"Threshold: \\>= {escape_md_v2(f'{threshold:.1f}%')}",
         f"News attached: {'on' if news_enabled else 'off'}",
-    ]
-    if next_run_local is not None:
-        lines.append(f"Next run: {escape_md_v2(next_run_local.strftime('%Y-%m-%d %H:%M %Z'))}")
-    else:
-        lines.append("Next run: _scheduler not running_")
+        "Schedule:",
+        f"  Pre\\-market: {'on' if premarket_enabled else 'off'}"
+        + (
+            f" \\(next {escape_md_v2(next_premarket_local.strftime('%Y-%m-%d %H:%M %Z'))}\\)"
+            if premarket_enabled and next_premarket_local is not None else ""
+        ),
+        f"  Post\\-market: {'on' if postmarket_enabled else 'off'}"
+        + (
+            f" \\(next {escape_md_v2(next_postmarket_local.strftime('%Y-%m-%d %H:%M %Z'))}\\)"
+            if postmarket_enabled and next_postmarket_local is not None else ""
+        ),
+    ])
     if last_run:
         status = escape_md_v2(str(last_run.get("status") or "?"))
         hits = last_run.get("hits_count")
         univ = last_run.get("universe_size")
+        scan_type = last_run.get("scan_type") or "?"
         finished = last_run.get("finished_at") or "?"
         lines.append(
-            f"Last run: {status} — {hits} hits / {univ} universe at {escape_md_v2(finished)}"
+            f"Last run \\({escape_md_v2(str(scan_type))}\\): "
+            f"{status} — {hits} hits / {univ} universe at {escape_md_v2(finished)}"
         )
     return "\n".join(lines)

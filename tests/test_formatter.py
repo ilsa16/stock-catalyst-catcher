@@ -6,6 +6,7 @@ from src.formatter import (
     escape_md_v2,
     render_digest,
     render_portfolio,
+    render_status,
     tradingview_url,
 )
 from src.scanner import GapHit
@@ -40,6 +41,43 @@ def test_render_digest_includes_all_hits():
     assert "*WXYZ*" in text
     assert "tradingview.com" in text
     assert "\\+8\\.20%" in text
+
+
+def test_render_digest_header_reflects_scan_type():
+    when = datetime(2026, 4, 22, 23, 30, tzinfo=ZoneInfo("Europe/Nicosia"))
+    hits = [_hit("AAPL.US", 8.2)]
+    chunks = render_digest(
+        hits, threshold=5.0, universe_size=100, scan_time_local=when,
+        scan_type="postmarket",
+    )
+    assert "Post\\-market gaps" in chunks[0]
+
+    chunks_pre = render_digest(
+        hits, threshold=5.0, universe_size=100, scan_time_local=when,
+        scan_type="premarket",
+    )
+    assert "Pre\\-market gaps" in chunks_pre[0]
+
+
+def test_render_status_includes_universe_and_schedule():
+    text = render_status(
+        subscribed=True,
+        threshold=7.0,
+        news_enabled=False,
+        universe_label="S&P 500",
+        tier_label=None,
+        premarket_enabled=True,
+        postmarket_enabled=True,
+        next_premarket_local=datetime(2026, 4, 23, 11, 30, tzinfo=ZoneInfo("Europe/Nicosia")),
+        next_postmarket_local=datetime(2026, 4, 23, 23, 30, tzinfo=ZoneInfo("Europe/Nicosia")),
+        last_run={"status": "ok", "hits_count": 4, "universe_size": 500,
+                  "finished_at": "2026-04-22T09:00:00+00:00", "scan_type": "premarket"},
+    )
+    assert "S&P 500" in text
+    assert "Pre\\-market: on" in text
+    assert "Post\\-market: on" in text
+    assert "7\\.0%" in text
+    assert "premarket" in text  # last-run tag
 
 
 def test_render_digest_chunks_when_huge():

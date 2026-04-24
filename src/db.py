@@ -7,12 +7,16 @@ import aiosqlite
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-    chat_id        INTEGER PRIMARY KEY,
-    username       TEXT,
-    subscribed     INTEGER DEFAULT 1,
-    gap_threshold  REAL    DEFAULT 5.0,
-    news_enabled   INTEGER DEFAULT 0,
-    created_at     TEXT    NOT NULL
+    chat_id            INTEGER PRIMARY KEY,
+    username           TEXT,
+    subscribed         INTEGER DEFAULT 1,
+    gap_threshold      REAL    DEFAULT 5.0,
+    news_enabled       INTEGER DEFAULT 0,
+    created_at         TEXT    NOT NULL,
+    universe_choice    TEXT    DEFAULT 'all_indices',
+    screener_tier      TEXT    DEFAULT 'default',
+    premarket_enabled  INTEGER DEFAULT 1,
+    postmarket_enabled INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS universe_cache (
@@ -23,6 +27,24 @@ CREATE TABLE IF NOT EXISTS universe_cache (
     refreshed_at   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS screener_cache (
+    tier           TEXT NOT NULL,
+    ticker         TEXT NOT NULL,
+    market_cap     REAL,
+    last_price     REAL,
+    avg_daily_vol  REAL,
+    refreshed_at   TEXT NOT NULL,
+    PRIMARY KEY (tier, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS index_members (
+    index_code     TEXT NOT NULL,
+    ticker         TEXT NOT NULL,
+    company_name   TEXT,
+    refreshed_at   TEXT NOT NULL,
+    PRIMARY KEY (index_code, ticker)
+);
+
 CREATE TABLE IF NOT EXISTS job_runs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at     TEXT NOT NULL,
@@ -30,7 +52,8 @@ CREATE TABLE IF NOT EXISTS job_runs (
     universe_size  INTEGER,
     hits_count     INTEGER,
     status         TEXT,
-    error          TEXT
+    error          TEXT,
+    scan_type      TEXT DEFAULT 'premarket'
 );
 
 CREATE TABLE IF NOT EXISTS alert_log (
@@ -83,7 +106,32 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """
+        Add columns on existing tables. CREATE TABLE IF NOT EXISTS is a no-op
+        when the table already exists, so columns added after v1 need explicit
+        ALTER TABLE guarded by PRAGMA.
+        """
+        # users: added post-v1
+        want_user_cols = {
+            "universe_choice":    "TEXT DEFAULT 'all_indices'",
+            "screener_tier":      "TEXT DEFAULT 'default'",
+            "premarket_enabled":  "INTEGER DEFAULT 1",
+            "postmarket_enabled": "INTEGER DEFAULT 0",
+        }
+        await self._ensure_columns("users", want_user_cols)
+        # job_runs: added post-v1
+        await self._ensure_columns("job_runs", {"scan_type": "TEXT DEFAULT 'premarket'"})
+
+    async def _ensure_columns(self, table: str, wanted: dict[str, str]) -> None:
+        async with self._conn.execute(f"PRAGMA table_info({table})") as cur:
+            existing = {row["name"] for row in await cur.fetchall()}
+        for col, decl in wanted.items():
+            if col not in existing:
+                await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -125,37 +173,115 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_threshold(self, chat_id: int, threshold: float) -> None:
+        await self.conn.execute(
+            "UPDATE users SET gap_threshold=? WHERE chat_id=?", (threshold, chat_id)
+        )
+        await self.conn.commit()
+
+    async def set_universe_choice(self, chat_id: int, choice: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET universe_choice=? WHERE chat_id=?", (choice, chat_id)
+        )
+        await self.conn.commit()
+
+    async def set_screener_tier(self, chat_id: int, tier: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET screener_tier=? WHERE chat_id=?", (tier, chat_id)
+        )
+        await self.conn.commit()
+
+    async def set_scan_enabled(self, chat_id: int, scan_type: str, enabled: bool) -> None:
+        col = "premarket_enabled" if scan_type == "premarket" else "postmarket_enabled"
+        await self.conn.execute(
+            f"UPDATE users SET {col}=? WHERE chat_id=?", (1 if enabled else 0, chat_id)
+        )
+        await self.conn.commit()
+
     async def get_user(self, chat_id: int) -> aiosqlite.Row | None:
         async with self.conn.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,)) as cur:
             return await cur.fetchone()
 
-    async def list_subscribed_users(self) -> list[aiosqlite.Row]:
-        async with self.conn.execute("SELECT * FROM users WHERE subscribed=1") as cur:
+    async def list_subscribed_users(self, scan_type: str | None = None) -> list[aiosqlite.Row]:
+        """
+        All subscribed users, optionally filtered to those who opted into a given
+        scan_type ('premarket' or 'postmarket').
+        """
+        if scan_type is None:
+            sql = "SELECT * FROM users WHERE subscribed=1"
+            params: tuple = ()
+        else:
+            col = "premarket_enabled" if scan_type == "premarket" else "postmarket_enabled"
+            sql = f"SELECT * FROM users WHERE subscribed=1 AND {col}=1"
+            params = ()
+        async with self.conn.execute(sql, params) as cur:
             return list(await cur.fetchall())
 
-    # ---------- universe ----------
+    # ---------- screener cache (per tier) ----------
 
-    async def replace_universe(self, rows: Iterable[dict[str, Any]]) -> None:
+    async def replace_screener_tier(self, tier: str, rows: Iterable[dict[str, Any]]) -> None:
         now = utc_now_iso()
-        await self.conn.execute("DELETE FROM universe_cache")
+        await self.conn.execute("DELETE FROM screener_cache WHERE tier=?", (tier,))
         await self.conn.executemany(
             """
-            INSERT INTO universe_cache (ticker, market_cap, last_price, avg_daily_vol, refreshed_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO screener_cache
+                (tier, ticker, market_cap, last_price, avg_daily_vol, refreshed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
-                (r["ticker"], r.get("market_cap"), r.get("last_price"), r.get("avg_daily_vol"), now)
+                (tier, r["ticker"], r.get("market_cap"), r.get("last_price"),
+                 r.get("avg_daily_vol"), now)
                 for r in rows
             ],
         )
         await self.conn.commit()
 
-    async def get_universe_tickers(self) -> list[str]:
-        async with self.conn.execute("SELECT ticker FROM universe_cache ORDER BY ticker") as cur:
+    async def get_screener_tickers(self, tier: str) -> list[str]:
+        async with self.conn.execute(
+            "SELECT ticker FROM screener_cache WHERE tier=? ORDER BY ticker", (tier,)
+        ) as cur:
             return [row["ticker"] for row in await cur.fetchall()]
 
-    async def universe_age_seconds(self) -> float | None:
-        async with self.conn.execute("SELECT MAX(refreshed_at) AS m FROM universe_cache") as cur:
+    async def screener_age_seconds(self, tier: str) -> float | None:
+        async with self.conn.execute(
+            "SELECT MAX(refreshed_at) AS m FROM screener_cache WHERE tier=?", (tier,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None or row["m"] is None:
+            return None
+        ts = datetime.fromisoformat(row["m"])
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+
+    # ---------- index members ----------
+
+    async def replace_index_members(
+        self, index_code: str, rows: Iterable[dict[str, Any]]
+    ) -> None:
+        now = utc_now_iso()
+        await self.conn.execute(
+            "DELETE FROM index_members WHERE index_code=?", (index_code,)
+        )
+        await self.conn.executemany(
+            """
+            INSERT INTO index_members (index_code, ticker, company_name, refreshed_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            [(index_code, r["ticker"], r.get("company_name"), now) for r in rows],
+        )
+        await self.conn.commit()
+
+    async def get_index_tickers(self, index_code: str) -> list[str]:
+        async with self.conn.execute(
+            "SELECT ticker FROM index_members WHERE index_code=? ORDER BY ticker",
+            (index_code,),
+        ) as cur:
+            return [row["ticker"] for row in await cur.fetchall()]
+
+    async def index_age_seconds(self, index_code: str) -> float | None:
+        async with self.conn.execute(
+            "SELECT MAX(refreshed_at) AS m FROM index_members WHERE index_code=?",
+            (index_code,),
+        ) as cur:
             row = await cur.fetchone()
         if row is None or row["m"] is None:
             return None
@@ -164,10 +290,10 @@ class Database:
 
     # ---------- job runs ----------
 
-    async def start_job_run(self) -> int:
+    async def start_job_run(self, scan_type: str = "premarket") -> int:
         cur = await self.conn.execute(
-            "INSERT INTO job_runs (started_at, status) VALUES (?, 'running')",
-            (utc_now_iso(),),
+            "INSERT INTO job_runs (started_at, status, scan_type) VALUES (?, 'running', ?)",
+            (utc_now_iso(), scan_type),
         )
         await self.conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
