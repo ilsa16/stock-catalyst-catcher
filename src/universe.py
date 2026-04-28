@@ -107,31 +107,34 @@ _SYMBOL_HEADERS = {"symbol", "ticker", "ticker symbol", "code"}
 
 class _WikiTickerParser(HTMLParser):
     """
-    Walk the first ``wikitable`` table on a Wikipedia page, locate the Symbol/Ticker
-    column by its header text, and collect that column's value for every subsequent
-    row. Ignores nested tables (only the outermost wikitable is consumed).
+    Walk every ``wikitable`` table on a Wikipedia page. For each one, locate a
+    Symbol/Ticker column by header text and collect that column's value from
+    every subsequent row. Tables without a recognized header are skipped (some
+    pages — Nasdaq-100 — open with summary tables that aren't constituents).
+
+    Nested tables are ignored: we only consume content at depth 1 inside the
+    current wikitable so a sub-table inside a cell can't bleed into output.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.in_wikitable = False
         self.nesting = 0
-        self.symbol_col: int | None = None
+        self.symbol_col: int | None = None  # reset per wikitable
         self.cell_index = -1
         self.cell_buf: list[str] = []
         self.in_th = False
         self.in_td = False
         self.tickers: list[str] = []
-        self._saw_table = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_d = {k: v for k, v in attrs}
         if tag == "table":
             cls = attrs_d.get("class", "") or ""
-            if not self._saw_table and "wikitable" in cls:
+            if not self.in_wikitable and "wikitable" in cls:
                 self.in_wikitable = True
                 self.nesting = 1
-                self._saw_table = True
+                self.symbol_col = None  # rediscover header for this table
             elif self.in_wikitable:
                 self.nesting += 1
             return

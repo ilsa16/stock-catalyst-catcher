@@ -79,6 +79,29 @@ def test_parse_wiki_tickers_empty_when_no_wikitable():
     assert parse_wiki_tickers("<html><body>no tables</body></html>") == []
 
 
+def test_parse_wiki_tickers_skips_first_table_without_symbol_column():
+    """
+    Regression for the NASDAQ-100 page: its first wikitable is an "All-Time
+    Highs" stats table (no Symbol/Ticker column). The constituents table only
+    appears further down. Parser must walk past tables that don't match.
+    """
+    html = """
+    <html><body>
+    <table class="wikitable">
+      <tr><th>Category</th><th>Value</th></tr>
+      <tr><td>Closing</td><td>27,305.68</td></tr>
+    </table>
+    <p>Some narrative text…</p>
+    <table class="wikitable">
+      <tr><th>Ticker</th><th>Company</th></tr>
+      <tr><td><a>NDX1</a></td><td>One</td></tr>
+      <tr><td><a>NDX2</a></td><td>Two</td></tr>
+    </table>
+    </body></html>
+    """
+    assert parse_wiki_tickers(html) == ["NDX1", "NDX2"]
+
+
 # ---------- shared fixtures ----------
 
 @pytest.fixture

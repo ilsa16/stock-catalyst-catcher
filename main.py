@@ -34,7 +34,15 @@ async def run() -> None:
     db = Database(settings.db_path)
     await db.connect()
 
-    http = httpx.AsyncClient(timeout=30.0, http2=False)
+    # Wikipedia 403's the default httpx UA; index-membership scrapes need
+    # an identifiable client. Per Wikimedia policy a contact handle is fine.
+    http = httpx.AsyncClient(
+        timeout=30.0,
+        http2=False,
+        headers={
+            "User-Agent": "stock-catalyst-catcher/1.0 (+https://github.com/ilsa16/stock-catalyst-catcher)",
+        },
+    )
     client = EODHDClient(http, settings.eodhd_api_key, db, settings.eodhd_daily_credit_cap)
 
     scheduler_ref: dict = {"sched": None}

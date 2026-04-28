@@ -10,6 +10,7 @@ import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -152,6 +153,26 @@ def _frequency_text(pre_on: bool, post_on: bool) -> str:
     )
 
 
+def _welcome_text(
+    *, universe_choice: str, gap_threshold: float,
+    premarket_enabled: bool, postmarket_enabled: bool,
+) -> str:
+    universe_label = escape_md_v2(UNIVERSE_LABELS[universe_choice])
+    threshold_str = escape_md_v2(f"{gap_threshold:.1f}%")
+    pre_part = "pre\\-market" if premarket_enabled else "off"
+    post_part = " \\+ post\\-market" if postmarket_enabled else ""
+    return (
+        "*Welcome to Catalyst Catcher*\n"
+        "You're subscribed with defaults:\n"
+        f"• Universe: {universe_label}\n"
+        f"• Threshold: ≥ {threshold_str}\n"
+        f"• Schedule: {pre_part}{post_part}\n\n"
+        "Customize any time:\n"
+        "/universe /screener /threshold /frequency\n"
+        "Manage a personal list with /watch and /portfolio\\."
+    )
+
+
 def build_telegram_app(
     settings: Settings,
     db: Database,
@@ -186,19 +207,11 @@ def build_telegram_app(
         row = await db.get_user(chat.id)
         assert row is not None
 
-        universe_label = escape_md_v2(UNIVERSE_LABELS[row["universe_choice"]])
-        threshold_str = escape_md_v2(f"{row['gap_threshold']:.1f}%")
-        pre_part = "pre\\-market" if row["premarket_enabled"] else "off"
-        post_part = " \\+ post\\-market" if row["postmarket_enabled"] else ""
-        text = (
-            "*Welcome to Catalyst Catcher*\n"
-            "You're subscribed with defaults:\n"
-            f"• Universe: {universe_label}\n"
-            f"• Threshold: ≥ {threshold_str}\n"
-            f"• Schedule: {pre_part}{post_part}\n\n"
-            "Customize any time:\n"
-            "/universe /screener /threshold /frequency\n"
-            "Manage a personal list with /watch and /portfolio\\."
+        text = _welcome_text(
+            universe_choice=row["universe_choice"],
+            gap_threshold=float(row["gap_threshold"]),
+            premarket_enabled=bool(row["premarket_enabled"]),
+            postmarket_enabled=bool(row["postmarket_enabled"]),
         )
         await msg.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -336,6 +349,18 @@ def build_telegram_app(
             reply_markup=_frequency_keyboard(pre_on, post_on),
         )
 
+    async def _safe_edit(q, text: str, reply_markup) -> None:
+        """Edit-in-place, swallowing the 'message is not modified' 400 that
+        fires when the user re-taps an already-selected option."""
+        try:
+            await q.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup,
+            )
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+            raise
+
     async def on_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         q = update.callback_query
         if q is None or q.data is None or q.message is None:
@@ -350,22 +375,14 @@ def build_telegram_app(
                     return
                 await db.set_universe_choice(chat_id, value)
                 await q.answer(f"Universe: {UNIVERSE_LABELS[value]}")
-                await q.edit_message_text(
-                    _universe_text(value),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=_universe_keyboard(value),
-                )
+                await _safe_edit(q, _universe_text(value), _universe_keyboard(value))
             elif prefix == "tier":
                 if value not in SCREENER_TIERS:
                     await q.answer("Unknown tier")
                     return
                 await db.set_screener_tier(chat_id, value)
                 await q.answer(f"Tier: {value.replace('_', ' ')}")
-                await q.edit_message_text(
-                    _screener_text(value),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=_screener_keyboard(value),
-                )
+                await _safe_edit(q, _screener_text(value), _screener_keyboard(value))
             elif prefix == "thr":
                 try:
                     threshold = float(value)
@@ -374,11 +391,7 @@ def build_telegram_app(
                     return
                 await db.set_threshold(chat_id, threshold)
                 await q.answer(f"Threshold: {threshold:g}%")
-                await q.edit_message_text(
-                    _threshold_text(threshold),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=_threshold_keyboard(threshold),
-                )
+                await _safe_edit(q, _threshold_text(threshold), _threshold_keyboard(threshold))
             elif prefix == "freq":
                 if value not in ("premarket", "postmarket"):
                     await q.answer("Unknown slot")
@@ -393,11 +406,7 @@ def build_telegram_app(
                 pre_on = new_state if value == "premarket" else bool(row["premarket_enabled"])
                 post_on = new_state if value == "postmarket" else bool(row["postmarket_enabled"])
                 await q.answer(f"{value}: {'on' if new_state else 'off'}")
-                await q.edit_message_text(
-                    _frequency_text(pre_on, post_on),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=_frequency_keyboard(pre_on, post_on),
-                )
+                await _safe_edit(q, _frequency_text(pre_on, post_on), _frequency_keyboard(pre_on, post_on))
             else:
                 await q.answer()
         except Exception as e:
