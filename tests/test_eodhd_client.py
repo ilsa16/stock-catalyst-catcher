@@ -5,7 +5,7 @@ import pytest
 import respx
 
 from src.db import Database
-from src.eodhd_client import BASE_URL, CreditCapExceeded, EODHDClient
+from src.eodhd_client import BASE_URL, CreditCapExceeded, EODHDClient, EODHDClientError
 
 
 @pytest.fixture
@@ -113,3 +113,42 @@ async def test_screener_returns_data_list(client):
         )
         rows = await client.screener(market_cap_min=1e9, price_min=10, avg_vol_min=1e5)
     assert rows == [{"code": "AAPL.US", "market_capitalization": 3e12}]
+
+
+@pytest.mark.asyncio
+async def test_screener_filter_format_matches_current_eodhd_api(client):
+    """
+    Regression for the 2026-04-28 silent break:
+      - exchange value must be uppercase 'US' (lowercase 'us' returns 422)
+      - the 5-day ADV field 'avgvol_5d' is gone; we use 'avgvol_1d'
+    """
+    import json as _json
+    with respx.mock() as mock:
+        route = mock.get(f"{BASE_URL}/screener").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+        await client.screener(market_cap_min=1e9, price_min=10, avg_vol_min=1e5)
+
+    sent_filters = _json.loads(route.calls[-1].request.url.params["filters"])
+    assert ["exchange", "=", "US"] in sent_filters
+    assert any(f[0] == "avgvol_1d" for f in sent_filters)
+    assert not any(f[0] == "avgvol_5d" for f in sent_filters)
+
+
+@pytest.mark.asyncio
+async def test_4xx_raises_eodhd_client_error_with_body(client, caplog):
+    """A 422 from EODHD must (a) not be retried away into oblivion and (b)
+    surface the response body so the next regression isn't opaque."""
+    with respx.mock() as mock:
+        mock.get(f"{BASE_URL}/screener").mock(
+            return_value=httpx.Response(
+                422, text="Unsupported field 'avgvol_5d'"
+            )
+        )
+        with pytest.raises(EODHDClientError) as excinfo:
+            with caplog.at_level("ERROR"):
+                await client.screener(market_cap_min=1e9, price_min=10, avg_vol_min=1e5)
+    assert "422" in str(excinfo.value)
+    assert "avgvol_5d" in str(excinfo.value)
+    # And the error log should contain the body too.
+    assert any("avgvol_5d" in r.getMessage() for r in caplog.records)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -20,6 +21,10 @@ BASE_URL = "https://eodhd.com/api"
 
 class CreditCapExceeded(RuntimeError):
     """Raised when a paid call would push us past the configured daily cap."""
+
+
+class EODHDClientError(RuntimeError):
+    """Raised on a non-retriable 4xx from EODHD (e.g. 422 from bad filter params)."""
 
 
 class EODHDClient:
@@ -72,10 +77,22 @@ class EODHDClient:
         ):
             with attempt:
                 resp = await self._http.get(url, params=params)
-                if resp.status_code >= 500:
+                # Retry-worthy: 5xx and 429.
+                if resp.status_code >= 500 or resp.status_code == 429:
                     resp.raise_for_status()
-                if resp.status_code == 429:
-                    resp.raise_for_status()
+                # 4xx other than 429 is a client-side problem (bad params, auth, etc.)
+                # — log the response body so the failure is debuggable instead of
+                # opaque, then raise a non-retriable error.
+                if 400 <= resp.status_code < 500:
+                    body_preview = (resp.text or "")[:500].replace("\n", " ")
+                    log.error(
+                        "EODHD %s returned %d: %s — params=%s",
+                        path, resp.status_code, body_preview,
+                        {k: v for k, v in params.items() if k != "api_token"},
+                    )
+                    raise EODHDClientError(
+                        f"EODHD {path} {resp.status_code}: {body_preview}"
+                    )
                 resp.raise_for_status()
                 data = resp.json()
 
@@ -95,16 +112,19 @@ class EODHDClient:
     ) -> list[dict[str, Any]]:
         """
         EODHD screener. Returns the raw `data` list of dict rows.
-        Filters: US exchange, MC, last close, ADV (5d).
+
+        Filter format gotchas (verified live against EODHD on 2026-04-28):
+          - `exchange` value is uppercase "US" (lowercase "us" returns 422).
+          - `avgvol_5d` no longer exists; use `avgvol_1d` for ADV.
         """
-        filters = (
-            f'[["exchange","=","us"],'
-            f'["market_capitalization",">",{market_cap_min}],'
-            f'["adjusted_close",">",{price_min}],'
-            f'["avgvol_5d",">",{avg_vol_min}]]'
-        )
+        filters_list = [
+            ["exchange", "=", "US"],
+            ["market_capitalization", ">", market_cap_min],
+            ["adjusted_close", ">", price_min],
+            ["avgvol_1d", ">", avg_vol_min],
+        ]
         params = {
-            "filters": filters,
+            "filters": json.dumps(filters_list),
             "limit": limit,
             "offset": offset,
         }
