@@ -159,6 +159,43 @@ class EODHDClient:
             return [data]
         return []
 
+    async def index_constituents(self, index_code: str) -> list[dict[str, Any]]:
+        """
+        Fetch the current constituents of a major US index from EODHD's
+        fundamentals endpoint (`/fundamentals/{index_code}.INDX`).
+
+        Returns a list of `{code, name, exchange}` dicts. `code` is the bare
+        symbol (e.g. "AAPL", "BRK-B"); the caller is responsible for adding
+        the `.US` exchange suffix.
+
+        Cost: 10 credits per call (one fundamentals lookup). Refresh sparingly.
+        """
+        data = await self._request(
+            f"/fundamentals/{index_code}.INDX",
+            params={},
+            cost=10,
+            essential=True,
+        )
+        if not isinstance(data, dict):
+            return []
+        components = data.get("Components") or {}
+        out: list[dict[str, Any]] = []
+        # EODHD returns Components as a dict keyed by stringified integer index.
+        # Iterate values regardless of key shape to be tolerant.
+        rows = components.values() if isinstance(components, dict) else components
+        for v in rows:
+            if not isinstance(v, dict):
+                continue
+            code = v.get("Code") or v.get("code")
+            if not code:
+                continue
+            out.append({
+                "code": str(code),
+                "name": v.get("Name") or v.get("name"),
+                "exchange": v.get("Exchange") or v.get("exchange"),
+            })
+        return out
+
     async def search(self, query: str) -> list[dict[str, Any]]:
         """
         EODHD symbol search. Returns up-to-`limit` matches with Code/Name/Exchange fields.

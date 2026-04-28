@@ -68,6 +68,25 @@ systemctl restart catalyst
 journalctl -u catalyst --since "1 hour ago"
 ```
 
+## Deploying a new version
+
+`systemctl restart catalyst` only restarts the **already-checked-out**
+code. Merging a PR on GitHub does *not* update the droplet on its own —
+you must pull and restart:
+
+```bash
+ssh root@<droplet-ip> '
+  cd /opt/stock-catalyst-catcher
+  sudo -u catalyst git pull --ff-only
+  systemctl restart catalyst
+  journalctl -u catalyst -n 30 --no-pager
+'
+```
+
+The `journalctl` tail at the end is the smoke test — confirm the new
+log lines look right (e.g. `screener tier default refreshed: <N>
+tickers`, no traces).
+
 ## Troubleshooting
 
 - **No alerts at 11:30 Europe/Nicosia:** check timezone with
