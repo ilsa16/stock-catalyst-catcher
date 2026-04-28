@@ -139,7 +139,7 @@ def render_status(
     if tier_label:
         lines.append(f"Screener tier: {escape_md_v2(tier_label)}")
     lines.extend([
-        f"Threshold: \\>= {escape_md_v2(f'{threshold:.1f}%')}",
+        f"Threshold: ≥ {escape_md_v2(f'{threshold:.1f}%')}",
         f"News attached: {'on' if news_enabled else 'off'}",
         "Schedule:",
         f"  Pre\\-market: {'on' if premarket_enabled else 'off'}"
