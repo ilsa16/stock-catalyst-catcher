@@ -34,25 +34,17 @@ async def run() -> None:
     db = Database(settings.db_path)
     await db.connect()
 
-    # Wikipedia 403's the default httpx UA; index-membership scrapes need
-    # an identifiable client. Per Wikimedia policy a contact handle is fine.
-    http = httpx.AsyncClient(
-        timeout=30.0,
-        http2=False,
-        headers={
-            "User-Agent": "stock-catalyst-catcher/1.0 (+https://github.com/ilsa16/stock-catalyst-catcher)",
-        },
-    )
+    http = httpx.AsyncClient(timeout=30.0, http2=False)
     client = EODHDClient(http, settings.eodhd_api_key, db, settings.eodhd_daily_credit_cap)
 
     scheduler_ref: dict = {"sched": None}
-    app = build_telegram_app(settings, db, client, http, scheduler_ref)
+    app = build_telegram_app(settings, db, client, scheduler_ref)
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    sched = build_scheduler(db, client, http, app.bot, settings)
+    sched = build_scheduler(db, client, app.bot, settings)
     sched.start()
     scheduler_ref["sched"] = sched
     log.info(

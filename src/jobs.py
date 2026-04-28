@@ -5,7 +5,6 @@ import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import httpx
 from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, TelegramError
@@ -52,7 +51,6 @@ async def _maybe_load_news(
 async def daily_scan(
     db: Database,
     client: EODHDClient,
-    http: httpx.AsyncClient,
     bot: Bot,
     settings: Settings,
     *,
@@ -89,7 +87,7 @@ async def daily_scan(
                 "error": None,
             }
 
-        tickers = await resolve_union_for_users(db, client, http, users)
+        tickers = await resolve_union_for_users(db, client, users)
         universe_size = len(tickers)
 
         hits: list[GapHit] = await scan_universe(client, tickers) if tickers else []
@@ -102,7 +100,7 @@ async def daily_scan(
         for user in users:
             user_universe = set(
                 await resolve_user_universe(
-                    db, client, http,
+                    db, client,
                     choice=user["universe_choice"],
                     tier=user["screener_tier"],
                     chat_id=user["chat_id"],

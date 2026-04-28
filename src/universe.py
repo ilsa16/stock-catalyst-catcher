@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import logging
-import re
-from html.parser import HTMLParser
 from typing import Any, Iterable
-
-import httpx
 
 from .db import Database
 from .eodhd_client import EODHDClient
@@ -34,15 +30,16 @@ UNIVERSE_LABELS: dict[str, str] = {
     UNIVERSE_WATCHLIST: "My watchlist",
 }
 
-# The indices that feed "all_indices" and the individual index choices.
 INDEX_CODES = (UNIVERSE_SP500, UNIVERSE_NDX, UNIVERSE_DJ30)
 
-# Wikipedia constituent pages. Tables on these pages expose a Symbol/Ticker column
-# which the scraper below locates by header name (robust to column-order drift).
-WIKI_URLS: dict[str, str] = {
-    UNIVERSE_SP500: "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-    UNIVERSE_NDX:   "https://en.wikipedia.org/wiki/Nasdaq-100",
-    UNIVERSE_DJ30:  "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
+# EODHD index symbols. Constituents fetched via the fundamentals endpoint
+# (`/fundamentals/{symbol}.INDX`). Replaces the earlier Wikipedia scrape: same
+# output shape, but it's a single first-party API, no UA/HTML brittleness, and
+# membership stays in sync with whatever EODHD's screener thinks "US" means.
+EODHD_INDEX_SYMBOLS: dict[str, str] = {
+    UNIVERSE_SP500: "GSPC",
+    UNIVERSE_NDX:   "NDX",
+    UNIVERSE_DJ30:  "DJI",
 }
 
 # ---------- screener tiers ----------
@@ -95,136 +92,48 @@ def _row_to_screener(row: dict[str, Any]) -> dict[str, Any]:
         "ticker": _normalize_ticker(code),
         "market_cap": row.get("market_capitalization") or row.get("MarketCapitalization"),
         "last_price": row.get("adjusted_close") or row.get("AdjustedClose"),
-        "avg_daily_vol": row.get("avgvol_5d") or row.get("AvgVol5D"),
+        # Screener field renamed by EODHD: avgvol_5d → avgvol_1d (see eodhd_client).
+        "avg_daily_vol": (
+            row.get("avgvol_1d")
+            or row.get("AvgVol1D")
+            or row.get("avgvol_5d")
+            or row.get("AvgVol5D")
+        ),
     }
 
 
-# ---------- Wikipedia scraper ----------
-
-_TICKER_RE = re.compile(r"[A-Z][A-Z0-9.\-]{0,5}")
-_SYMBOL_HEADERS = {"symbol", "ticker", "ticker symbol", "code"}
-
-
-class _WikiTickerParser(HTMLParser):
-    """
-    Walk every ``wikitable`` table on a Wikipedia page. For each one, locate a
-    Symbol/Ticker column by header text and collect that column's value from
-    every subsequent row. Tables without a recognized header are skipped (some
-    pages — Nasdaq-100 — open with summary tables that aren't constituents).
-
-    Nested tables are ignored: we only consume content at depth 1 inside the
-    current wikitable so a sub-table inside a cell can't bleed into output.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.in_wikitable = False
-        self.nesting = 0
-        self.symbol_col: int | None = None  # reset per wikitable
-        self.cell_index = -1
-        self.cell_buf: list[str] = []
-        self.in_th = False
-        self.in_td = False
-        self.tickers: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attrs_d = {k: v for k, v in attrs}
-        if tag == "table":
-            cls = attrs_d.get("class", "") or ""
-            if not self.in_wikitable and "wikitable" in cls:
-                self.in_wikitable = True
-                self.nesting = 1
-                self.symbol_col = None  # rediscover header for this table
-            elif self.in_wikitable:
-                self.nesting += 1
-            return
-        if not self.in_wikitable or self.nesting != 1:
-            return
-        if tag == "tr":
-            self.cell_index = -1
-        elif tag in ("th", "td"):
-            self.cell_index += 1
-            self.cell_buf = []
-            self.in_th = tag == "th"
-            self.in_td = tag == "td"
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "table" and self.in_wikitable:
-            self.nesting -= 1
-            if self.nesting == 0:
-                self.in_wikitable = False
-            return
-        if not self.in_wikitable or self.nesting != 1:
-            return
-        if tag in ("th", "td"):
-            text = " ".join("".join(self.cell_buf).split()).strip()
-            if self.in_th and self.symbol_col is None:
-                if text.lower() in _SYMBOL_HEADERS:
-                    self.symbol_col = self.cell_index
-            elif (
-                self.in_td
-                and self.symbol_col is not None
-                and self.cell_index == self.symbol_col
-            ):
-                token = text.split()[0] if text else ""
-                m = _TICKER_RE.fullmatch(token)
-                if m:
-                    self.tickers.append(token)
-            self.in_th = False
-            self.in_td = False
-
-    def handle_data(self, data: str) -> None:
-        # Only buffer text at the outermost wikitable level — nested tables
-        # are ignored so their cell content doesn't bleed into the ticker column.
-        if (self.in_th or self.in_td) and self.in_wikitable and self.nesting == 1:
-            self.cell_buf.append(data)
-
-
-def parse_wiki_tickers(html: str) -> list[str]:
-    p = _WikiTickerParser()
-    p.feed(html)
-    # dedupe, preserve order
-    seen: set[str] = set()
-    out: list[str] = []
-    for t in p.tickers:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
-
-
-async def _scrape_index(http: httpx.AsyncClient, index_code: str) -> list[dict[str, str]]:
-    url = WIKI_URLS[index_code]
-    resp = await http.get(url, follow_redirects=True, timeout=20.0)
-    resp.raise_for_status()
-    tickers = parse_wiki_tickers(resp.text)
-    return [{"ticker": _normalize_ticker(t), "company_name": None} for t in tickers]
-
+# ---------- index membership (EODHD-backed) ----------
 
 async def ensure_index_members(
-    db: Database, http: httpx.AsyncClient, index_code: str
+    db: Database, client: EODHDClient, index_code: str
 ) -> list[str]:
     """
-    Returns EODHD-form tickers for an index (sp500/ndx/dj30). Refreshes from Wikipedia
-    when the cache is stale; falls back to whatever is cached if the scrape fails.
+    Return EODHD-form tickers for an index (sp500/ndx/dj30). Refresh the local
+    cache via EODHD's fundamentals endpoint when stale; on any failure, fall
+    back to whatever was last cached.
     """
+    if index_code not in EODHD_INDEX_SYMBOLS:
+        return []
     age = await db.index_age_seconds(index_code)
-    stale = age is None or age > INDEX_CACHE_TTL
-    if stale:
+    if age is None or age > INDEX_CACHE_TTL:
         try:
-            rows = await _scrape_index(http, index_code)
-            # Sanity floors — don't overwrite a good cache with a degraded scrape.
+            raw = await client.index_constituents(EODHD_INDEX_SYMBOLS[index_code])
             min_expected = {UNIVERSE_SP500: 400, UNIVERSE_NDX: 80, UNIVERSE_DJ30: 20}
-            if len(rows) >= min_expected[index_code]:
+            if len(raw) >= min_expected[index_code]:
+                rows = [
+                    {"ticker": _normalize_ticker(r["code"]), "company_name": r.get("name")}
+                    for r in raw
+                    if r.get("code")
+                ]
                 await db.replace_index_members(index_code, rows)
                 log.info("index %s refreshed: %d tickers", index_code, len(rows))
             else:
                 log.warning(
-                    "index %s scrape returned only %d rows; keeping cache",
-                    index_code, len(rows),
+                    "index %s constituents call returned only %d rows; keeping cache",
+                    index_code, len(raw),
                 )
         except Exception as e:
-            log.exception("index %s scrape failed: %s", index_code, e)
+            log.exception("index %s constituents fetch failed: %s", index_code, e)
     return await db.get_index_tickers(index_code)
 
 
@@ -280,7 +189,6 @@ async def ensure_screener_tier(
 async def resolve_user_universe(
     db: Database,
     client: EODHDClient,
-    http: httpx.AsyncClient,
     *,
     choice: str,
     tier: str,
@@ -293,12 +201,12 @@ async def resolve_user_universe(
     if choice == UNIVERSE_CUSTOM:
         return await ensure_screener_tier(db, client, tier)
     if choice in INDEX_CODES:
-        return await ensure_index_members(db, http, choice)
+        return await ensure_index_members(db, client, choice)
     # all_indices — default
     out: list[str] = []
     seen: set[str] = set()
     for code in INDEX_CODES:
-        for t in await ensure_index_members(db, http, code):
+        for t in await ensure_index_members(db, client, code):
             if t not in seen:
                 seen.add(t)
                 out.append(t)
@@ -308,7 +216,6 @@ async def resolve_user_universe(
 async def resolve_union_for_users(
     db: Database,
     client: EODHDClient,
-    http: httpx.AsyncClient,
     users: Iterable[Any],
 ) -> list[str]:
     """Deduplicated ticker union across every user's resolved universe."""
@@ -316,7 +223,7 @@ async def resolve_union_for_users(
     for user in users:
         try:
             tickers = await resolve_user_universe(
-                db, client, http,
+                db, client,
                 choice=user["universe_choice"],
                 tier=user["screener_tier"],
                 chat_id=user["chat_id"],

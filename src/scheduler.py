@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from zoneinfo import ZoneInfo
 
-import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram import Bot
@@ -26,7 +25,6 @@ JOB_ID = PREMARKET_JOB_ID
 def build_scheduler(
     db: Database,
     client: EODHDClient,
-    http: httpx.AsyncClient,
     bot: Bot,
     settings: Settings,
 ) -> AsyncIOScheduler:
@@ -35,12 +33,12 @@ def build_scheduler(
 
     async def _run_premarket() -> None:
         log.info("premarket scan firing")
-        result = await daily_scan(db, client, http, bot, settings, scan_type="premarket")
+        result = await daily_scan(db, client, bot, settings, scan_type="premarket")
         log.info("premarket scan finished: %s", result)
 
     async def _run_postmarket() -> None:
         log.info("postmarket scan firing")
-        result = await daily_scan(db, client, http, bot, settings, scan_type="postmarket")
+        result = await daily_scan(db, client, bot, settings, scan_type="postmarket")
         log.info("postmarket scan finished: %s", result)
 
     sched.add_job(

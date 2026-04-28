@@ -185,14 +185,14 @@ def test_render_digest_no_hits_is_valid_md_v2():
 
 # ---------- bot wiring ----------
 
-def test_build_telegram_app_registers_all_commands(settings, db, client, http):
+def test_build_telegram_app_registers_all_commands(settings, db, client):
     """
     Imports + handler-registration smoke test. Catches a TypeError in the
     factory or a missing command before deploying.
     """
     from src.telegram_bot import build_telegram_app
 
-    app = build_telegram_app(settings, db, client, http, scheduler_ref={"sched": None})
+    app = build_telegram_app(settings, db, client, scheduler_ref={"sched": None})
     # python-telegram-bot stores handlers in app.handlers[group_id] -> list
     handler_names = []
     for group in app.handlers.values():
@@ -210,9 +210,9 @@ def test_build_telegram_app_registers_all_commands(settings, db, client, http):
     assert not missing, f"missing handlers: {missing}"
 
 
-def test_build_scheduler_registers_both_jobs(settings, db, client, http):
+def test_build_scheduler_registers_both_jobs(settings, db, client):
     bot = MagicMock()
-    sched = build_scheduler(db, client, http, bot, settings)
+    sched = build_scheduler(db, client, bot, settings)
     # Don't shutdown — AsyncIOScheduler.shutdown needs a running loop, and we
     # never started one. Just verify the jobs are registered.
     ids = {j.id for j in sched.get_jobs()}
@@ -223,10 +223,10 @@ def test_build_scheduler_registers_both_jobs(settings, db, client, http):
 # ---------- daily_scan end-to-end ----------
 
 @pytest.mark.asyncio
-async def test_daily_scan_no_subscribed_users_returns_quickly(db, client, http, settings):
+async def test_daily_scan_no_subscribed_users_returns_quickly(db, client, settings):
     bot = MagicMock()
     bot.send_message = AsyncMock()
-    result = await daily_scan(db, client, http, bot, settings, scan_type="premarket")
+    result = await daily_scan(db, client, bot, settings, scan_type="premarket")
     assert result["status"] == "ok"
     assert result["universe_size"] == 0
     assert result["hits_count"] == 0
@@ -234,7 +234,7 @@ async def test_daily_scan_no_subscribed_users_returns_quickly(db, client, http, 
 
 
 @pytest.mark.asyncio
-async def test_daily_scan_only_chat_id_sends_one_digest(db, client, http, settings):
+async def test_daily_scan_only_chat_id_sends_one_digest(db, client, settings):
     """
     Full happy path: one user on watchlist universe, /run_now-style call.
     Mocks the EODHD live_batch to return an above-threshold quote; verifies
@@ -260,7 +260,7 @@ async def test_daily_scan_only_chat_id_sends_one_digest(db, client, http, settin
     bot.send_message = fake_send_message
 
     result = await daily_scan(
-        db, client, http, bot, settings,
+        db, client, bot, settings,
         scan_type="premarket", only_chat_id=42,
     )
     assert result["status"] == "ok", result.get("error")

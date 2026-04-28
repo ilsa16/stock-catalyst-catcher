@@ -6,7 +6,6 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -177,7 +176,6 @@ def build_telegram_app(
     settings: Settings,
     db: Database,
     client: EODHDClient,
-    http: httpx.AsyncClient,
     scheduler_ref: dict,
 ) -> Application:
     """
@@ -539,7 +537,7 @@ def build_telegram_app(
         await msg.reply_text("Scanning now…")
         async with run_now_lock:
             result = await daily_scan(
-                db, client, http, app.bot, settings,
+                db, client, app.bot, settings,
                 scan_type="premarket", only_chat_id=chat.id,
             )
         if result["status"] == "ok":
