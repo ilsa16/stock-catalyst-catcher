@@ -19,14 +19,14 @@ def test_tradingview_url_strips_exchange():
     assert tradingview_url("AAPL.US") == "https://www.tradingview.com/chart/?symbol=AAPL"
 
 
-def _hit(ticker: str, gap: float, price: float = 50.0) -> GapHit:
+def _hit(ticker: str, gap: float, price: float = 50.0, source: str = "extended") -> GapHit:
     return GapHit(
         ticker=ticker,
         price=price,
         prior_close=price / (1 + gap / 100),
         gap_pct=gap,
         timestamp=None,
-        source="extended",
+        source=source,
     )
 
 
@@ -68,3 +68,28 @@ def test_render_digest_news_link_attached():
         news_by_ticker={"AAPL.US": "https://example.com/article"},
     )
     assert "[news](https://example.com/article)" in chunks[0]
+
+
+# ---------- title is data-driven ----------
+
+def test_render_digest_title_premarket_when_only_extended():
+    when = datetime(2026, 4, 22, 11, 30, tzinfo=ZoneInfo("Europe/Nicosia"))
+    hits = [_hit("AAPL.US", 8.2, source="extended")]
+    chunks = render_digest(hits, threshold=5.0, universe_size=10, scan_time_local=when)
+    assert "Pre\\-market gaps" in chunks[0]
+    assert "Intraday" not in chunks[0]
+
+
+def test_render_digest_title_intraday_when_only_regular():
+    when = datetime(2026, 4, 22, 16, 0, tzinfo=ZoneInfo("Europe/Nicosia"))
+    hits = [_hit("AAPL.US", 8.2, source="regular")]
+    chunks = render_digest(hits, threshold=5.0, universe_size=10, scan_time_local=when)
+    assert "Intraday gaps" in chunks[0]
+    assert "Pre\\-market" not in chunks[0]
+
+
+def test_render_digest_title_mixed_when_both_sources():
+    when = datetime(2026, 4, 22, 16, 0, tzinfo=ZoneInfo("Europe/Nicosia"))
+    hits = [_hit("AAPL.US", 8.2, source="extended"), _hit("MSFT.US", 6.0, source="regular")]
+    chunks = render_digest(hits, threshold=5.0, universe_size=10, scan_time_local=when)
+    assert "extended" in chunks[0] and "intraday" in chunks[0]

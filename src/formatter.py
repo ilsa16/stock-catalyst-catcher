@@ -38,6 +38,19 @@ def _fmt_hit_line(hit: GapHit, news_url: str | None) -> str:
     return line
 
 
+def _digest_title(hits: list[GapHit]) -> str:
+    """Pick a title that reflects the data: 'Pre-market', 'Intraday', or mixed."""
+    ext = sum(1 for h in hits if h.source == "extended")
+    reg = sum(1 for h in hits if h.source == "regular")
+    if ext and not reg:
+        return "Pre\\-market gaps"
+    if reg and not ext:
+        return "Intraday gaps"
+    if ext and reg:
+        return "Gaps \\(extended \\+ intraday\\)"
+    return "Gaps"  # no hits
+
+
 def render_digest(
     hits: list[GapHit],
     *,
@@ -53,7 +66,7 @@ def render_digest(
     news_by_ticker = news_by_ticker or {}
     threshold_str = escape_md_v2(f"{threshold:.1f}%")
     when = escape_md_v2(scan_time_local.strftime("%Y-%m-%d %H:%M %Z"))
-    header = f"*Pre\\-market gaps ≥ {threshold_str}* — _{when}_"
+    header = f"*{_digest_title(hits)} ≥ {threshold_str}* — _{when}_"
 
     if not hits:
         body = escape_md_v2(f"No tickers above threshold (universe size {universe_size}).")
