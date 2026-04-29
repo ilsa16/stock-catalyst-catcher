@@ -117,19 +117,16 @@ class EODHDClient:
 
     async def live_batch(self, tickers: list[str]) -> list[dict[str, Any]]:
         """
-        Live v2 quote for a batch of US tickers. EODHD takes the first ticker as the
-        path and the remaining ones in `s=`. Returns one dict per ticker.
+        Live v2 (US extended quotes) for a batch of US tickers.
+        Endpoint: /api/us-quote-delayed?s=T1,T2,...
+        Includes pre/post-market fields ethPrice, ethVolume, ethTime (ms).
+        Returns one dict per ticker.
         """
         if not tickers:
             return []
-        head, *rest = tickers
-        params: dict[str, Any] = {}
-        if rest:
-            params["s"] = ",".join(rest)
-        # Cost: 1 credit per symbol
         data = await self._request(
-            f"/real-time/{head}",
-            params=params,
+            "/us-quote-delayed",
+            params={"s": ",".join(tickers)},
             cost=len(tickers),
             essential=True,
         )

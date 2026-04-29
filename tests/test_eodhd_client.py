@@ -25,14 +25,26 @@ async def client(db):
 
 
 @pytest.mark.asyncio
-async def test_live_batch_passes_remaining_symbols_in_s_param(client, db):
+async def test_live_batch_uses_us_quote_delayed_with_all_symbols(client, db):
     with respx.mock(assert_all_called=True) as mock:
-        route = mock.get(f"{BASE_URL}/real-time/AAPL.US").mock(
+        route = mock.get(f"{BASE_URL}/us-quote-delayed").mock(
             return_value=httpx.Response(
                 200,
                 json=[
-                    {"code": "AAPL.US", "close": 110.0, "previousClose": 100.0, "change_p": 10.0},
-                    {"code": "MSFT.US", "close": 105.0, "previousClose": 100.0, "change_p": 5.0},
+                    {
+                        "code": "AAPL.US",
+                        "close": 110.0,
+                        "previousClose": 100.0,
+                        "change_p": 10.0,
+                        "ethPrice": 112.0,
+                        "ethTime": 1_770_000_000_000,
+                    },
+                    {
+                        "code": "MSFT.US",
+                        "close": 105.0,
+                        "previousClose": 100.0,
+                        "change_p": 5.0,
+                    },
                 ],
             )
         )
@@ -40,7 +52,8 @@ async def test_live_batch_passes_remaining_symbols_in_s_param(client, db):
 
     assert len(rows) == 2
     call = route.calls[-1]
-    assert call.request.url.params["s"] == "MSFT.US"
+    # Live v2 batches *all* symbols in `s=`; the legacy head-in-path is gone.
+    assert call.request.url.params["s"] == "AAPL.US,MSFT.US"
     assert call.request.url.params["api_token"] == "TESTKEY"
     assert await db.credits_used_today() == 2
 
@@ -50,7 +63,7 @@ async def test_credit_cap_blocks_essential(client, db):
     # Use up the budget
     await db.add_credits(999)
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(f"{BASE_URL}/real-time/AAPL.US").mock(
+        mock.get(f"{BASE_URL}/us-quote-delayed").mock(
             return_value=httpx.Response(200, json=[{"code": "AAPL.US"}])
         )
         with pytest.raises(CreditCapExceeded):

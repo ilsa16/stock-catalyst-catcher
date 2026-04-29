@@ -20,7 +20,14 @@ def test_tradingview_url_strips_exchange():
 
 
 def _hit(ticker: str, gap: float, price: float = 50.0) -> GapHit:
-    return GapHit(ticker=ticker, price=price, prior_close=price / (1 + gap / 100), gap_pct=gap, timestamp=None)
+    return GapHit(
+        ticker=ticker,
+        price=price,
+        prior_close=price / (1 + gap / 100),
+        gap_pct=gap,
+        timestamp=None,
+        source="extended",
+    )
 
 
 def test_render_digest_no_hits_returns_one_message():
