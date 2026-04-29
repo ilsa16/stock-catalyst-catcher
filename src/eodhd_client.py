@@ -119,22 +119,32 @@ class EODHDClient:
         """
         Live v2 (US extended quotes) for a batch of US tickers.
         Endpoint: /api/us-quote-delayed?s=T1,T2,...
-        Includes pre/post-market fields ethPrice, ethVolume, ethTime (ms).
-        Returns one dict per ticker.
+
+        The v2 envelope is `{"meta": ..., "data": {ticker: row, ...}, "links": ...}`.
+        We unwrap to a flat list of row dicts, copying the dict key into a `code`
+        field so downstream parsing has a canonical ticker.
         """
         if not tickers:
             return []
-        data = await self._request(
+        payload = await self._request(
             "/us-quote-delayed",
             params={"s": ",".join(tickers)},
             cost=len(tickers),
             essential=True,
         )
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return [data]
-        return []
+        rows: list[dict[str, Any]] = []
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            for key, row in payload["data"].items():
+                if not isinstance(row, dict):
+                    continue
+                r = dict(row)
+                r.setdefault("code", key)
+                rows.append(r)
+        elif isinstance(payload, list):
+            rows = [r for r in payload if isinstance(r, dict)]
+        elif isinstance(payload, dict):
+            rows = [payload]
+        return rows
 
     async def top_news(self, ticker: str) -> dict[str, Any] | None:
         """Single most recent news item for a ticker. Non-essential (gated above 80%)."""

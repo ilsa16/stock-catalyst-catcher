@@ -25,34 +25,39 @@ async def client(db):
 
 
 @pytest.mark.asyncio
-async def test_live_batch_uses_us_quote_delayed_with_all_symbols(client, db):
+async def test_live_batch_unwraps_v2_envelope(client, db):
+    """Live v2 returns {meta, data: {ticker: row}, links}; client flattens to a list."""
     with respx.mock(assert_all_called=True) as mock:
         route = mock.get(f"{BASE_URL}/us-quote-delayed").mock(
             return_value=httpx.Response(
                 200,
-                json=[
-                    {
-                        "code": "AAPL.US",
-                        "close": 110.0,
-                        "previousClose": 100.0,
-                        "change_p": 10.0,
-                        "ethPrice": 112.0,
-                        "ethTime": 1_770_000_000_000,
+                json={
+                    "meta": {"count": 2},
+                    "data": {
+                        "AAPL.US": {
+                            "symbol": "AAPL.US",
+                            "lastTradePrice": 110.0,
+                            "previousClosePrice": 100.0,
+                            "ethPrice": 112.0,
+                            "ethTime": 1_770_000_000_000,
+                        },
+                        "MSFT.US": {
+                            "symbol": "MSFT.US",
+                            "lastTradePrice": 105.0,
+                            "previousClosePrice": 100.0,
+                        },
                     },
-                    {
-                        "code": "MSFT.US",
-                        "close": 105.0,
-                        "previousClose": 100.0,
-                        "change_p": 5.0,
-                    },
-                ],
+                    "links": {"next": None},
+                },
             )
         )
         rows = await client.live_batch(["AAPL.US", "MSFT.US"])
 
     assert len(rows) == 2
+    by_code = {r["code"]: r for r in rows}
+    assert "AAPL.US" in by_code and "MSFT.US" in by_code
+
     call = route.calls[-1]
-    # Live v2 batches *all* symbols in `s=`; the legacy head-in-path is gone.
     assert call.request.url.params["s"] == "AAPL.US,MSFT.US"
     assert call.request.url.params["api_token"] == "TESTKEY"
     assert await db.credits_used_today() == 2
