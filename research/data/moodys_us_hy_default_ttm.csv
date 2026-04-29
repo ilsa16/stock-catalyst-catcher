@@ -1,0 +1,19 @@
+date,default_rate_pct,is_forecast,source_id,note
+2001-12-31,10.6,0,moodys_default_study_historical,Approximate 2001 cycle peak (TMT bust); S&P had 10.54% same year
+2007-12-31,0.9,0,moodys_default_study_historical,Pre-GFC cycle low
+2008-12-31,4.3,0,moodys_default_study_historical,Approximate; matches S&P 4.30%
+2009-11-30,14.7,0,moodys_default_study_historical,GFC cycle peak (commonly cited Moody's value)
+2009-12-31,13.0,0,moodys_default_study_historical,End of 2009 reading
+2010-12-31,3.3,0,moodys_default_study_historical,
+2015-12-31,3.3,0,moodys_default_study_historical,
+2016-12-31,5.6,0,moodys_default_study_historical,Energy/commodities-driven mini-peak
+2019-12-31,2.9,0,moodys_default_study_historical,Pre-COVID baseline
+2020-12-31,8.6,0,moodys_us_2026_outlook_blog,COVID cycle peak
+2021-12-31,1.7,0,moodys_default_study_historical,Cycle low post-stimulus
+2022-12-31,1.4,0,moodys_default_study_historical,
+2023-12-31,5.6,0,moodys_q1_2024_credit_review,
+2024-03-31,5.6,0,moodys_q1_2024_credit_review,TTM as of March 2024
+2024-11-30,6.9,0,moodys_july_2025_credit_review,
+2024-12-31,7.8,0,moodys_july_2025_credit_review,Post-GFC high
+2025-10-31,5.3,0,moodys_us_2026_outlook_blog,
+2026-12-31,3.0,1,moodys_us_2026_outlook_blog,Forecast (Moody's baseline)

@@ -1,0 +1,11 @@
+date,default_rate_pct,is_forecast,source_id,note
+2009-11-30,10.81,0,morningstar_lsta_index_history,All-time peak (GFC); par-weighted
+2014-09-30,4.5,0,pitchbook_lcd_history,Approximate 2014 mini-peak (energy/midstream)
+2020-09-30,4.17,0,pitchbook_lcd_history,"COVID cycle peak (par-weighted, excluding LMEs)"
+2023-07-31,1.75,0,pitchbook_lcd_history,Post-pandemic high (by amount)
+2023-12-31,1.53,0,pitchbook_lcd_history,
+2024-12-31,0.91,0,pitchbook_lcd_2024_yearend,Excluding distressed LMEs
+2025-07-31,1.11,0,pitchbook_lcd_july_2025,
+2025-11-30,1.25,0,pitchbook_lcd_nov_2025,
+2026-03-31,1.75,1,sp_global_default_outlook_2026,Forecast (S&P; March 2026 endpoint)
+2026-09-30,1.48,1,pitchbook_lcd_default_predictor,Forecast (PitchBook LCD predictor)
