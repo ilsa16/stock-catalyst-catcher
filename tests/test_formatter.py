@@ -53,6 +53,45 @@ def test_render_digest_includes_all_hits():
     assert "\\+8\\.20%" in text
 
 
+def test_render_digest_shows_closed_note_outside_session():
+    """At 23:30 ET (between sessions) the digest should warn that markets
+    are closed and the data is the regular-session close, not live."""
+    when = datetime(2026, 4, 30, 23, 30, tzinfo=ZoneInfo("America/New_York"))
+    hits = [_hit("TECH.US", 6.49, source="regular", timestamp=1777579222)]
+    chunks = render_digest(hits, threshold=3.0, universe_size=516, scan_time_local=when)
+    assert "Markets closed" in chunks[0]
+    assert "04:00" in chunks[0] and "20:00" in chunks[0]
+
+
+def test_render_digest_no_closed_note_during_post_market():
+    # 17:00 ET — squarely in the post-market window
+    when = datetime(2026, 4, 30, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+    hits = [_hit("QCOM.US", 8.4, source="extended", timestamp=1777593600)]
+    chunks = render_digest(hits, threshold=3.0, universe_size=516, scan_time_local=when)
+    assert "Markets closed" not in chunks[0]
+
+
+def test_render_digest_no_closed_note_during_regular_session():
+    when = datetime(2026, 4, 30, 11, 0, tzinfo=ZoneInfo("America/New_York"))
+    hits = [_hit("AAPL.US", 5.2, source="regular", timestamp=1777593600)]
+    chunks = render_digest(hits, threshold=3.0, universe_size=516, scan_time_local=when)
+    assert "Markets closed" not in chunks[0]
+
+
+def test_render_digest_no_closed_note_during_pre_market():
+    # 06:00 ET — pre-market window (04:00–09:30)
+    when = datetime(2026, 4, 30, 6, 0, tzinfo=ZoneInfo("America/New_York"))
+    chunks = render_digest([], threshold=3.0, universe_size=516, scan_time_local=when)
+    assert "Markets closed" not in chunks[0]
+
+
+def test_render_digest_closed_note_works_with_nicosia_input():
+    # 06:31 EEST in late April = 23:31 EDT → closed
+    when = datetime(2026, 5, 1, 6, 31, tzinfo=ZoneInfo("Europe/Nicosia"))
+    chunks = render_digest([], threshold=3.0, universe_size=516, scan_time_local=when)
+    assert "Markets closed" in chunks[0]
+
+
 def test_render_digest_includes_per_hit_timestamp_in_eastern():
     """Each hit line should show the trade time in US/Eastern so the user can
     immediately tell pre-market vs regular vs post-market data."""

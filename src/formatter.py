@@ -50,6 +50,28 @@ def _fmt_hit_line(hit: GapHit, news_url: str | None) -> str:
     return line
 
 
+def _session_status(scan_time_local: datetime) -> str | None:
+    """
+    When the scan ran outside any active EODHD session window (04:00–20:00 ET),
+    returns a one-line note. During an active session returns None — the digest
+    title (Pre-market / Intraday / Post-market) already conveys what's happening.
+
+    The note exists because EODHD's HTTP feeds and WebSocket alike go silent
+    once post-market closes at 20:00 ET. A /run_now at midnight ET surfaces
+    the regular-session close as the "latest" data, which is technically true
+    but visually confusing without context.
+    """
+    et = scan_time_local.astimezone(_NYC)
+    minutes = et.hour * 60 + et.minute
+    if 4 * 60 <= minutes < 20 * 60:
+        return None
+    return (
+        "Markets closed. Showing latest available data — likely the "
+        "regular-session close. Live extended-hours data is only available "
+        "between 04:00 and 20:00 ET."
+    )
+
+
 def _digest_title(hits: list[GapHit], scan_time_local: datetime) -> str:
     """
     Pick a title that reflects what's actually in the digest, not what the
@@ -103,6 +125,10 @@ def render_digest(
     when = escape_md_v2(scan_time_local.strftime("%Y-%m-%d %H:%M %Z"))
     title = _digest_title(hits, scan_time_local)
     header = f"*{title} ≥ {threshold_str}* — _{when}_"
+
+    closed_note = _session_status(scan_time_local)
+    if closed_note:
+        header += f"\n_{escape_md_v2(closed_note)}_"
 
     if not hits:
         body = escape_md_v2(f"No tickers above threshold (universe size {universe_size}).")
