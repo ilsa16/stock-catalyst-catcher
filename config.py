@@ -18,6 +18,13 @@ class Settings(BaseSettings):
 
     default_gap_threshold: float = 5.0
 
+    # Drop hits whose latest trade is older than this many hours. EODHD's
+    # delayed feeds don't always serve fresh post-market data, so this stops
+    # the bot re-emitting yesterday's regular close as if it were live.
+    # Default 12h: long enough that a /run_now during late post-market still
+    # surfaces that day's close; short enough that yesterday's gaps are gone.
+    max_hit_age_hours: int = 12
+
     scan_hour: int = 11
     scan_minute: int = 30
     scan_timezone: str = "Europe/Nicosia"

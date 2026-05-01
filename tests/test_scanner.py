@@ -1,4 +1,9 @@
-from src.scanner import ETH_FRESH_SECONDS, GapHit, parse_quote
+from src.scanner import (
+    DEFAULT_MAX_HIT_AGE_SECONDS,
+    ETH_FRESH_SECONDS,
+    GapHit,
+    parse_quote,
+)
 
 
 # ---------- legacy /real-time fallback shape ----------
@@ -113,6 +118,42 @@ def test_parse_quote_uses_regular_when_eth_older_than_regular():
     assert hit is not None
     assert hit.source == "regular"
     assert hit.price == 108.0
+
+
+def test_parse_quote_drops_stale_hits_when_max_age_set():
+    """A hit older than max_age_seconds should be filtered out — stops the bot
+    from re-emitting yesterday's regular close as a "new" gap during a late
+    /run_now."""
+    now = 1_700_000_000.0
+    stale_ms = int((now - 13 * 3600) * 1000)  # 13h ago, > default 12h
+    fresh_ms = int((now - 30 * 60) * 1000)    # 30 min ago, fresh
+
+    stale_quote = {
+        "code": "OLD.US",
+        "previousClosePrice": 100.0,
+        "lastTradePrice": 110.0,
+        "lastTradeTime": stale_ms,
+    }
+    fresh_quote = {
+        "code": "NEW.US",
+        "previousClosePrice": 100.0,
+        "lastTradePrice": 110.0,
+        "lastTradeTime": fresh_ms,
+    }
+
+    # No max_age → both pass
+    assert parse_quote(stale_quote, now=now) is not None
+    assert parse_quote(fresh_quote, now=now) is not None
+
+    # With default max_age → stale dropped, fresh kept
+    assert parse_quote(
+        stale_quote, now=now, max_age_seconds=DEFAULT_MAX_HIT_AGE_SECONDS
+    ) is None
+    fresh_hit = parse_quote(
+        fresh_quote, now=now, max_age_seconds=DEFAULT_MAX_HIT_AGE_SECONDS
+    )
+    assert fresh_hit is not None
+    assert fresh_hit.ticker == "NEW.US"
 
 
 def test_parse_quote_strips_autolink_artifact_in_ticker():

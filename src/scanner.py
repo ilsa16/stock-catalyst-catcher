@@ -16,6 +16,12 @@ ABSOLUTE_GAP_FLOOR = 5.0  # global lower bound; per-user threshold filters furth
 # Keeps us from picking up yesterday's after-hours close at 4:30 AM ET.
 ETH_FRESH_SECONDS = 6 * 3600
 
+# Default upper bound on a hit's age. Anything older is considered stale and
+# dropped from the digest — stops the bot re-emitting yesterday's gaps as if
+# they're new. Caller (scan_universe) can override per-call; the default of 12h
+# is set so a /run_now run during late post-market still shows that day's close.
+DEFAULT_MAX_HIT_AGE_SECONDS = 12 * 3600
+
 
 @dataclass(frozen=True)
 class GapHit:
@@ -66,10 +72,15 @@ def _normalize_ticker(raw: Any) -> str | None:
     return s or None
 
 
-def parse_quote(raw: dict[str, Any], *, now: float | None = None) -> GapHit | None:
+def parse_quote(
+    raw: dict[str, Any],
+    *,
+    now: float | None = None,
+    max_age_seconds: int | None = None,
+) -> GapHit | None:
     """
-    Parse one Live v2 (us-quote-delayed) row into a GapHit, or None if invalid /
-    below the absolute floor.
+    Parse one Live v2 (us-quote-delayed) row into a GapHit, or None if invalid,
+    below the absolute floor, or staler than `max_age_seconds`.
 
     Logic:
       - Use the extended-hours print (`ethPrice` / `ethTime`) iff it's both
@@ -82,6 +93,10 @@ def parse_quote(raw: dict[str, Any], *, now: float | None = None) -> GapHit | No
       - Falls back to the older /real-time response shape (`close`,
         `previousClose`, seconds-resolution `timestamp`) so that historic
         respx fixtures and any cached payloads still parse.
+      - When `max_age_seconds` is set, drops the hit if its chosen timestamp is
+        older than that many seconds from `now`. Default None = no filter, so
+        unit tests with hard-coded timestamps still pass; callers like
+        scan_universe pass DEFAULT_MAX_HIT_AGE_SECONDS.
     """
     code = _normalize_ticker(raw.get("code") or raw.get("symbol") or raw.get("Code"))
     if not code:
@@ -130,6 +145,10 @@ def parse_quote(raw: dict[str, Any], *, now: float | None = None) -> GapHit | No
     if gap_pct < ABSOLUTE_GAP_FLOOR:
         return None
 
+    if max_age_seconds is not None and ts is not None:
+        if now_s - ts > max_age_seconds:
+            return None
+
     return GapHit(
         ticker=code,
         price=price,
@@ -140,10 +159,16 @@ def parse_quote(raw: dict[str, Any], *, now: float | None = None) -> GapHit | No
     )
 
 
-async def scan_universe(client: EODHDClient, tickers: list[str]) -> list[GapHit]:
+async def scan_universe(
+    client: EODHDClient,
+    tickers: list[str],
+    *,
+    max_age_seconds: int | None = DEFAULT_MAX_HIT_AGE_SECONDS,
+) -> list[GapHit]:
     """
     Pull batched Live v2 quotes for `tickers`, parse, filter to
-    >= ABSOLUTE_GAP_FLOOR, return hits sorted by gap_pct descending.
+    >= ABSOLUTE_GAP_FLOOR and at most `max_age_seconds` old, return hits sorted
+    by gap_pct descending.
     """
     hits: list[GapHit] = []
     for i in range(0, len(tickers), QUOTE_BATCH_SIZE):
@@ -154,7 +179,7 @@ async def scan_universe(client: EODHDClient, tickers: list[str]) -> list[GapHit]
             log.exception("quote batch failed (offset=%d, size=%d): %s", i, len(batch), e)
             continue
         for q in quotes:
-            hit = parse_quote(q)
+            hit = parse_quote(q, max_age_seconds=max_age_seconds)
             if hit is not None:
                 hits.append(hit)
 

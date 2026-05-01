@@ -35,7 +35,16 @@ def _fmt_hit_line(hit: GapHit, news_url: str | None) -> str:
     pct = escape_md_v2(f"+{hit.gap_pct:.2f}%")
     price = escape_md_v2(f"${hit.price:,.2f}")
     chart = f"[chart]({tradingview_url(hit.ticker)})"
-    line = f"• *{sym}* {pct} @ {price} — {chart}"
+    # Always render the trade timestamp in US/Eastern — that's the timezone US
+    # equity sessions are defined in, so a user can immediately tell whether
+    # a hit is from pre-market, the regular session, or after-hours.
+    if hit.timestamp:
+        from datetime import datetime as _dt
+        ts = _dt.fromtimestamp(hit.timestamp, tz=_NYC).strftime("%H:%M %Z")
+        ts_part = f" _\\({escape_md_v2(ts)}\\)_"
+    else:
+        ts_part = ""
+    line = f"• *{sym}* {pct} @ {price}{ts_part} — {chart}"
     if news_url:
         line += f" · [news]({news_url})"
     return line
