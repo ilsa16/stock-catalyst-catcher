@@ -6,6 +6,7 @@ pydantic-settings==2.5.2
 tenacity==9.0.0
 python-dotenv==1.0.1
 tzdata==2024.2
+websockets==13.1
 
 # Dev
 pytest==8.3.3

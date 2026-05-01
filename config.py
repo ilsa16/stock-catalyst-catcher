@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     # surfaces that day's close; short enough that yesterday's gaps are gone.
     max_hit_age_hours: int = 12
 
+    # WebSocket trade-stream listening window for pre-/post-market scans.
+    # 0 disables the WS overlay entirely (HTTP-only, current behavior).
+    # 20–30 seconds is enough to capture live extended-hours prints on the
+    # active names without slowing the scan to a crawl. The All-In-One plan
+    # supports /ws/us; smaller plans should keep this at 0.
+    ws_collect_seconds: int = 20
+
     scan_hour: int = 11
     scan_minute: int = 30
     scan_timezone: str = "Europe/Nicosia"

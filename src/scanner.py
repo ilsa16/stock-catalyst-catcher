@@ -159,18 +159,54 @@ def parse_quote(
     )
 
 
+def _overlay_ws_quotes(
+    raw_quotes: list[dict[str, Any]],
+    ws_results: dict[str, dict[str, Any]],
+) -> None:
+    """
+    Mutate `raw_quotes` in-place: for each ticker present in `ws_results`
+    (real-time WS trade), replace lastTradePrice/lastTradeTime if the WS
+    timestamp is more recent than the HTTP snapshot. parse_quote then
+    naturally picks the fresher print.
+
+    Tickers absent from ws_results are left as-is, so the HTTP value still
+    works as a fallback when WS sees no trade.
+    """
+    for q in raw_quotes:
+        code = (q.get("code") or q.get("symbol") or q.get("Code") or "")
+        code = str(code).upper()
+        ws = ws_results.get(code)
+        if ws is None:
+            continue
+        http_ts = q.get("lastTradeTime") or 0
+        try:
+            http_ts_int = int(http_ts)
+        except (TypeError, ValueError):
+            http_ts_int = 0
+        if ws["ts_ms"] > http_ts_int:
+            q["lastTradePrice"] = ws["price"]
+            q["lastTradeTime"] = ws["ts_ms"]
+
+
 async def scan_universe(
     client: EODHDClient,
     tickers: list[str],
     *,
     max_age_seconds: int | None = DEFAULT_MAX_HIT_AGE_SECONDS,
+    ws_collect_seconds: float = 0.0,
+    ws_api_key: str | None = None,
 ) -> list[GapHit]:
     """
     Pull batched Live v2 quotes for `tickers`, parse, filter to
     >= ABSOLUTE_GAP_FLOOR and at most `max_age_seconds` old, return hits sorted
     by gap_pct descending.
+
+    When `ws_collect_seconds > 0` and `ws_api_key` is set, also opens an
+    EODHD WebSocket trade collector for the same universe and overlays any
+    fresher prints onto the HTTP snapshot. Used during pre- and post-market
+    scans where HTTP doesn't reliably surface extended-hours data.
     """
-    hits: list[GapHit] = []
+    raw_quotes: list[dict[str, Any]] = []
     for i in range(0, len(tickers), QUOTE_BATCH_SIZE):
         batch = tickers[i : i + QUOTE_BATCH_SIZE]
         try:
@@ -178,10 +214,26 @@ async def scan_universe(
         except Exception as e:  # don't let one batch nuke the run
             log.exception("quote batch failed (offset=%d, size=%d): %s", i, len(batch), e)
             continue
-        for q in quotes:
-            hit = parse_quote(q, max_age_seconds=max_age_seconds)
-            if hit is not None:
-                hits.append(hit)
+        raw_quotes.extend(quotes)
+
+    if ws_collect_seconds > 0 and ws_api_key:
+        # Lazy import to keep websockets out of the test-time critical path
+        # for code paths that don't enable WS collection.
+        from .eodhd_ws import collect_trades_ws
+        try:
+            ws_results = await collect_trades_ws(
+                ws_api_key, tickers, ws_collect_seconds,
+            )
+            if ws_results:
+                _overlay_ws_quotes(raw_quotes, ws_results)
+        except Exception as e:
+            log.exception("ws collect failed; using HTTP-only snapshot: %s", e)
+
+    hits: list[GapHit] = []
+    for q in raw_quotes:
+        hit = parse_quote(q, max_age_seconds=max_age_seconds)
+        if hit is not None:
+            hits.append(hit)
 
     hits.sort(key=lambda h: h.gap_pct, reverse=True)
     if hits:
