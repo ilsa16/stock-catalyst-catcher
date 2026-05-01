@@ -21,13 +21,16 @@ def test_tradingview_url_strips_exchange():
     assert tradingview_url("AAPL.US") == "https://www.tradingview.com/chart/?symbol=AAPL"
 
 
-def _hit(ticker: str, gap: float, price: float = 50.0, source: str = "regular") -> GapHit:
+def _hit(
+    ticker: str, gap: float, price: float = 50.0, source: str = "regular",
+    timestamp: int | None = None,
+) -> GapHit:
     return GapHit(
         ticker=ticker,
         price=price,
         prior_close=price / (1 + gap / 100),
         gap_pct=gap,
-        timestamp=None,
+        timestamp=timestamp,
         source=source,
     )
 
@@ -48,6 +51,18 @@ def test_render_digest_includes_all_hits():
     assert "*WXYZ*" in text
     assert "tradingview.com" in text
     assert "\\+8\\.20%" in text
+
+
+def test_render_digest_includes_per_hit_timestamp_in_eastern():
+    """Each hit line should show the trade time in US/Eastern so the user can
+    immediately tell pre-market vs regular vs post-market data."""
+    when = datetime(2026, 4, 30, 23, 30, tzinfo=ZoneInfo("America/New_York"))
+    # 1777579222 = 2026-04-30 16:00:22 EDT (the regular session close)
+    hits = [_hit("TECH.US", 6.49, price=55.32, source="regular", timestamp=1777579222)]
+    chunks = render_digest(hits, threshold=3.0, universe_size=516, scan_time_local=when)
+    text = chunks[0]
+    # Telegram MarkdownV2 escapes the parentheses and colon stays literal.
+    assert "16:00 EDT" in text
 
 
 def test_render_digest_title_intraday_when_all_regular():

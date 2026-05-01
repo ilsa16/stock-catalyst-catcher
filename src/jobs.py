@@ -90,7 +90,13 @@ async def daily_scan(
         tickers = await resolve_union_for_users(db, client, users)
         universe_size = len(tickers)
 
-        hits: list[GapHit] = await scan_universe(client, tickers) if tickers else []
+        hits: list[GapHit] = (
+            await scan_universe(
+                client, tickers,
+                max_age_seconds=settings.max_hit_age_hours * 3600,
+            )
+            if tickers else []
+        )
         hits_count = len(hits)
         hits_by_ticker: dict[str, GapHit] = {h.ticker: h for h in hits}
 
