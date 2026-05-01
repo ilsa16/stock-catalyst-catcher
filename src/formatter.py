@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 from .scanner import GapHit
+
+_NYC = ZoneInfo("America/New_York")
 
 TELEGRAM_MAX_MESSAGE = 4096
 
@@ -38,10 +41,39 @@ def _fmt_hit_line(hit: GapHit, news_url: str | None) -> str:
     return line
 
 
-_SCAN_LABELS = {
-    "premarket": "Pre-market gaps",
-    "postmarket": "Post-market gaps",
-}
+def _digest_title(hits: list[GapHit], scan_time_local: datetime) -> str:
+    """
+    Pick a title that reflects what's actually in the digest, not what the
+    scheduler thinks it asked for.
+
+    - Empty hits → "Gaps".
+    - All regular → "Intraday gaps".
+    - All extended + scan time in pre-market window (04:00–09:30 ET)  → "Pre-market gaps".
+    - All extended + scan time in post-market window (16:00–20:00 ET) → "Post-market gaps".
+    - All extended + outside both windows → "Extended-hours gaps".
+    - Mixed → "Gaps (extended + intraday)".
+
+    Already-MarkdownV2-escaped (the caller composes the header).
+    """
+    if not hits:
+        return "Gaps"
+    ext = sum(1 for h in hits if h.source == "extended")
+    reg = sum(1 for h in hits if h.source == "regular")
+
+    if reg and not ext:
+        return "Intraday gaps"
+    if ext and reg:
+        return "Gaps \\(extended \\+ intraday\\)"
+
+    # All extended — pick window by ET hour.
+    et = scan_time_local.astimezone(_NYC)
+    h, m = et.hour, et.minute
+    minutes_since_midnight = h * 60 + m
+    if 4 * 60 <= minutes_since_midnight < 9 * 60 + 30:
+        return "Pre\\-market gaps"
+    if 16 * 60 <= minutes_since_midnight < 20 * 60:
+        return "Post\\-market gaps"
+    return "Extended\\-hours gaps"
 
 
 def render_digest(
@@ -50,7 +82,7 @@ def render_digest(
     threshold: float,
     universe_size: int,
     scan_time_local: datetime,
-    scan_type: str = "premarket",
+    scan_type: str = "premarket",  # kept for caller compat; title is data-driven
     news_by_ticker: dict[str, str | None] | None = None,
 ) -> list[str]:
     """
@@ -60,8 +92,8 @@ def render_digest(
     news_by_ticker = news_by_ticker or {}
     threshold_str = escape_md_v2(f"{threshold:.1f}%")
     when = escape_md_v2(scan_time_local.strftime("%Y-%m-%d %H:%M %Z"))
-    label = escape_md_v2(_SCAN_LABELS.get(scan_type, "Gaps"))
-    header = f"*{label} ≥ {threshold_str}* — _{when}_"
+    title = _digest_title(hits, scan_time_local)
+    header = f"*{title} ≥ {threshold_str}* — _{when}_"
 
     if not hits:
         body = escape_md_v2(f"No tickers above threshold (universe size {universe_size}).")

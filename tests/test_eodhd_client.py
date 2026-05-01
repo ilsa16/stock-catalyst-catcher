@@ -25,22 +25,38 @@ async def client(db):
 
 
 @pytest.mark.asyncio
-async def test_live_batch_passes_remaining_symbols_in_s_param(client, db):
+async def test_live_batch_unwraps_us_quote_delayed_envelope(client, db):
+    """v2 returns {meta, data: {ticker: row, ...}, links}. We flatten and copy
+    the ticker key into a `code` field for downstream parsers."""
     with respx.mock(assert_all_called=True) as mock:
-        route = mock.get(f"{BASE_URL}/real-time/AAPL.US").mock(
+        route = mock.get(f"{BASE_URL}/us-quote-delayed").mock(
             return_value=httpx.Response(
                 200,
-                json=[
-                    {"code": "AAPL.US", "close": 110.0, "previousClose": 100.0, "change_p": 10.0},
-                    {"code": "MSFT.US", "close": 105.0, "previousClose": 100.0, "change_p": 5.0},
-                ],
+                json={
+                    "meta": {"symbols": 2},
+                    "data": {
+                        "AAPL.US": {
+                            "lastTradePrice": 110.0,
+                            "previousClosePrice": 100.0,
+                            "lastTradeTime": 1_700_000_000_000,
+                        },
+                        "MSFT.US": {
+                            "lastTradePrice": 105.0,
+                            "previousClosePrice": 100.0,
+                            "lastTradeTime": 1_700_000_000_000,
+                        },
+                    },
+                    "links": {"self": "..."},
+                },
             )
         )
         rows = await client.live_batch(["AAPL.US", "MSFT.US"])
 
     assert len(rows) == 2
+    codes = {r["code"] for r in rows}
+    assert codes == {"AAPL.US", "MSFT.US"}
     call = route.calls[-1]
-    assert call.request.url.params["s"] == "MSFT.US"
+    assert call.request.url.params["s"] == "AAPL.US,MSFT.US"
     assert call.request.url.params["api_token"] == "TESTKEY"
     assert await db.credits_used_today() == 2
 
@@ -50,8 +66,8 @@ async def test_credit_cap_blocks_essential(client, db):
     # Use up the budget
     await db.add_credits(999)
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(f"{BASE_URL}/real-time/AAPL.US").mock(
-            return_value=httpx.Response(200, json=[{"code": "AAPL.US"}])
+        mock.get(f"{BASE_URL}/us-quote-delayed").mock(
+            return_value=httpx.Response(200, json={"data": {"AAPL.US": {}}})
         )
         with pytest.raises(CreditCapExceeded):
             await client.live_batch(["AAPL.US", "MSFT.US"])  # cost=2 → would push past 1000

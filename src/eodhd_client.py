@@ -137,27 +137,41 @@ class EODHDClient:
 
     async def live_batch(self, tickers: list[str]) -> list[dict[str, Any]]:
         """
-        Live v2 quote for a batch of US tickers. EODHD takes the first ticker as the
-        path and the remaining ones in `s=`. Returns one dict per ticker.
+        Live v2 (US extended quotes) for a batch of US tickers.
+        Endpoint: /api/us-quote-delayed?s=T1,T2,...
+
+        Unlike the older /real-time/{ticker} endpoint, this one returns
+        extended-hours fields (`ethPrice`, `ethTime`, `ethVolume`) alongside
+        the regular-session print, so post-market and pre-market gaps are
+        actually visible in the response.
+
+        Envelope shape: {"meta": ..., "data": {ticker: row, ...}, "links": ...}.
+        We unwrap to a flat list of row dicts and copy the dict key into a
+        `code` field so downstream parsing has a canonical ticker.
+
+        Cost: 1 credit per symbol.
         """
         if not tickers:
             return []
-        head, *rest = tickers
-        params: dict[str, Any] = {}
-        if rest:
-            params["s"] = ",".join(rest)
-        # Cost: 1 credit per symbol
-        data = await self._request(
-            f"/real-time/{head}",
-            params=params,
+        payload = await self._request(
+            "/us-quote-delayed",
+            params={"s": ",".join(tickers)},
             cost=len(tickers),
             essential=True,
         )
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return [data]
-        return []
+        rows: list[dict[str, Any]] = []
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            for key, row in payload["data"].items():
+                if not isinstance(row, dict):
+                    continue
+                r = dict(row)
+                r.setdefault("code", key)
+                rows.append(r)
+        elif isinstance(payload, list):
+            rows = [r for r in payload if isinstance(r, dict)]
+        elif isinstance(payload, dict):
+            rows = [payload]
+        return rows
 
     async def index_constituents(self, index_code: str) -> list[dict[str, Any]]:
         """

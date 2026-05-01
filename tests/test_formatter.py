@@ -21,8 +21,15 @@ def test_tradingview_url_strips_exchange():
     assert tradingview_url("AAPL.US") == "https://www.tradingview.com/chart/?symbol=AAPL"
 
 
-def _hit(ticker: str, gap: float, price: float = 50.0) -> GapHit:
-    return GapHit(ticker=ticker, price=price, prior_close=price / (1 + gap / 100), gap_pct=gap, timestamp=None)
+def _hit(ticker: str, gap: float, price: float = 50.0, source: str = "regular") -> GapHit:
+    return GapHit(
+        ticker=ticker,
+        price=price,
+        prior_close=price / (1 + gap / 100),
+        gap_pct=gap,
+        timestamp=None,
+        source=source,
+    )
 
 
 def test_render_digest_no_hits_returns_one_message():
@@ -43,20 +50,45 @@ def test_render_digest_includes_all_hits():
     assert "\\+8\\.20%" in text
 
 
-def test_render_digest_header_reflects_scan_type():
-    when = datetime(2026, 4, 22, 23, 30, tzinfo=ZoneInfo("Europe/Nicosia"))
-    hits = [_hit("AAPL.US", 8.2)]
-    chunks = render_digest(
-        hits, threshold=5.0, universe_size=100, scan_time_local=when,
-        scan_type="postmarket",
-    )
+def test_render_digest_title_intraday_when_all_regular():
+    when = datetime(2026, 4, 22, 16, 0, tzinfo=ZoneInfo("America/New_York"))
+    hits = [_hit("AAPL.US", 8.2, source="regular")]
+    chunks = render_digest(hits, threshold=5.0, universe_size=100, scan_time_local=when)
+    assert "Intraday gaps" in chunks[0]
+
+
+def test_render_digest_title_premarket_window_when_extended():
+    # 06:00 ET → in pre-market window (04:00–09:30)
+    when = datetime(2026, 4, 22, 6, 0, tzinfo=ZoneInfo("America/New_York"))
+    hits = [_hit("AAPL.US", 8.2, source="extended")]
+    chunks = render_digest(hits, threshold=5.0, universe_size=100, scan_time_local=when)
+    assert "Pre\\-market gaps" in chunks[0]
+
+
+def test_render_digest_title_postmarket_window_when_extended():
+    # 17:00 ET → in post-market window (16:00–20:00)
+    when = datetime(2026, 4, 22, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+    hits = [_hit("QCOM.US", 8.4, source="extended")]
+    chunks = render_digest(hits, threshold=5.0, universe_size=500, scan_time_local=when)
     assert "Post\\-market gaps" in chunks[0]
 
-    chunks_pre = render_digest(
-        hits, threshold=5.0, universe_size=100, scan_time_local=when,
-        scan_type="premarket",
-    )
-    assert "Pre\\-market gaps" in chunks_pre[0]
+
+def test_render_digest_title_mixed_when_both_sources():
+    when = datetime(2026, 4, 22, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+    hits = [
+        _hit("AAPL.US", 8.2, source="extended"),
+        _hit("MSFT.US", 6.0, source="regular"),
+    ]
+    chunks = render_digest(hits, threshold=5.0, universe_size=100, scan_time_local=when)
+    assert "extended" in chunks[0] and "intraday" in chunks[0]
+
+
+def test_render_digest_title_handles_nicosia_to_et_conversion():
+    # 23:30 Europe/Nicosia in late April = 16:30 EDT → post-market window
+    when = datetime(2026, 4, 28, 23, 30, tzinfo=ZoneInfo("Europe/Nicosia"))
+    hits = [_hit("QCOM.US", 8.4, source="extended")]
+    chunks = render_digest(hits, threshold=5.0, universe_size=500, scan_time_local=when)
+    assert "Post\\-market gaps" in chunks[0]
 
 
 def test_render_status_includes_universe_and_schedule():
