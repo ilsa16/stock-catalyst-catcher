@@ -19,6 +19,32 @@ from .universe import resolve_union_for_users, resolve_user_universe
 
 log = logging.getLogger(__name__)
 
+_NYC = ZoneInfo("America/New_York")
+
+
+def _ws_collect_seconds_for(scan_time_local: datetime, settings: Settings) -> float:
+    """
+    Decide how long to listen on the EODHD WebSocket for the current scan,
+    based on what session ET is in:
+
+      - 04:00–09:30 ET (pre-market) → settings.ws_collect_seconds
+      - 16:00–20:00 ET (post-market) → settings.ws_collect_seconds
+      - regular session 09:30–16:00 → 0 (HTTP /us-quote-delayed is fresh enough)
+      - other (overnight) → 0 (no live trades to capture)
+
+    Returning 0 is the kill-switch — scan_universe skips the WS overlay
+    entirely. Set settings.ws_collect_seconds=0 in env to disable globally.
+    """
+    if settings.ws_collect_seconds <= 0:
+        return 0.0
+    et = scan_time_local.astimezone(_NYC)
+    minutes = et.hour * 60 + et.minute
+    in_premarket = 4 * 60 <= minutes < 9 * 60 + 30
+    in_postmarket = 16 * 60 <= minutes < 20 * 60
+    if in_premarket or in_postmarket:
+        return float(settings.ws_collect_seconds)
+    return 0.0
+
 
 async def _send_digest_to(
     bot: Bot,
@@ -90,10 +116,16 @@ async def daily_scan(
         tickers = await resolve_union_for_users(db, client, users)
         universe_size = len(tickers)
 
+        tz = ZoneInfo(settings.scan_timezone)
+        scan_local = datetime.now(tz)
+        ws_seconds = _ws_collect_seconds_for(scan_local, settings)
+
         hits: list[GapHit] = (
             await scan_universe(
                 client, tickers,
                 max_age_seconds=settings.max_hit_age_hours * 3600,
+                ws_collect_seconds=ws_seconds,
+                ws_api_key=settings.eodhd_api_key if ws_seconds > 0 else None,
             )
             if tickers else []
         )
@@ -121,9 +153,6 @@ async def daily_scan(
                 news_needed.update(h.ticker for h in user_hits)
 
         news_by_ticker = await _maybe_load_news(client, news_needed) if news_needed else {}
-
-        tz = ZoneInfo(settings.scan_timezone)
-        scan_local = datetime.now(tz)
 
         for user, user_hits in per_user_hits:
             chunks = render_digest(
