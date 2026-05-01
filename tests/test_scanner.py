@@ -1,9 +1,12 @@
-from src.scanner import GapHit, parse_quote
+from src.scanner import ETH_FRESH_SECONDS, GapHit, parse_quote
 
+
+# ---------- legacy /real-time fallback shape ----------
 
 def test_parse_quote_valid_above_threshold():
     hit = parse_quote(
-        {"code": "AAPL.US", "close": 110.0, "previousClose": 100.0, "change_p": 10.0, "timestamp": 1700000000}
+        {"code": "AAPL.US", "close": 110.0, "previousClose": 100.0,
+         "change_p": 10.0, "timestamp": 1700000000}
     )
     assert isinstance(hit, GapHit)
     assert hit.ticker == "AAPL.US"
@@ -12,6 +15,7 @@ def test_parse_quote_valid_above_threshold():
     assert hit.prior_close == 100.0
     assert hit.timestamp == 1700000000
     assert hit.display_ticker == "AAPL"
+    assert hit.source == "regular"
 
 
 def test_parse_quote_below_floor_returns_none():
@@ -20,7 +24,9 @@ def test_parse_quote_below_floor_returns_none():
     ) is None
 
 
-def test_parse_quote_falls_back_when_change_p_missing():
+def test_parse_quote_computes_gap_from_prior_not_change_p():
+    """API's change_p denominator is unreliable per row; gap_pct must be
+    computed from (price-prior)/prior."""
     hit = parse_quote({"code": "TSLA.US", "close": 108.0, "previousClose": 100.0})
     assert hit is not None
     assert round(hit.gap_pct, 2) == 8.0
@@ -40,3 +46,83 @@ def test_parse_quote_handles_zero_prior():
 
 def test_parse_quote_missing_code():
     assert parse_quote({"close": 110.0, "previousClose": 100.0, "change_p": 10.0}) is None
+
+
+# ---------- v2 /us-quote-delayed shape with ethPrice ----------
+
+def test_parse_quote_uses_eth_price_when_fresh_and_newer():
+    """During pre-/post-market: ethTime > lastTradeTime AND fresh → use ethPrice."""
+    now = 1_700_000_000.0  # epoch seconds
+    eth_time_ms = int((now - 60) * 1000)         # 60s ago
+    reg_time_ms = int((now - 24 * 3600) * 1000)  # yesterday
+    hit = parse_quote(
+        {
+            "code": "QCOM.US",
+            "previousClosePrice": 150.0,
+            "lastTradePrice": 152.0,           # +1.3%, below threshold
+            "lastTradeTime": reg_time_ms,
+            "ethPrice": 165.0,                 # +10%, above threshold
+            "ethTime": eth_time_ms,
+        },
+        now=now,
+    )
+    assert hit is not None
+    assert hit.source == "extended"
+    assert hit.price == 165.0
+    assert round(hit.gap_pct, 2) == 10.0
+
+
+def test_parse_quote_ignores_stale_eth_price():
+    """If ethTime is older than ETH_FRESH_SECONDS, fall back to regular print."""
+    now = 1_700_000_000.0
+    stale_eth_ms = int((now - ETH_FRESH_SECONDS - 1) * 1000)  # just outside window
+    fresh_reg_ms = int((now - 60) * 1000)
+    hit = parse_quote(
+        {
+            "code": "AAPL.US",
+            "previousClosePrice": 100.0,
+            "lastTradePrice": 110.0,
+            "lastTradeTime": fresh_reg_ms,
+            "ethPrice": 130.0,
+            "ethTime": stale_eth_ms,
+        },
+        now=now,
+    )
+    assert hit is not None
+    assert hit.source == "regular"
+    assert hit.price == 110.0
+
+
+def test_parse_quote_uses_regular_when_eth_older_than_regular():
+    """During regular hours, ethTime is from this morning's pre-market and
+    older than the live regular print — must use regular."""
+    now = 1_700_000_000.0
+    eth_time_ms = int((now - 4 * 3600) * 1000)    # 4h ago (still fresh by 6h window)
+    reg_time_ms = int((now - 60) * 1000)          # 60s ago — newer
+    hit = parse_quote(
+        {
+            "code": "MSFT.US",
+            "previousClosePrice": 100.0,
+            "lastTradePrice": 108.0,
+            "lastTradeTime": reg_time_ms,
+            "ethPrice": 110.0,
+            "ethTime": eth_time_ms,
+        },
+        now=now,
+    )
+    assert hit is not None
+    assert hit.source == "regular"
+    assert hit.price == 108.0
+
+
+def test_parse_quote_strips_autolink_artifact_in_ticker():
+    """Pasted '[AAPL.US](http://AAPL.US)' should normalize to 'AAPL.US'."""
+    hit = parse_quote(
+        {
+            "code": "[AAPL.US](http://AAPL.US)",
+            "previousClosePrice": 100.0,
+            "lastTradePrice": 110.0,
+        }
+    )
+    assert hit is not None
+    assert hit.ticker == "AAPL.US"
