@@ -18,28 +18,38 @@ UNIVERSE_ALL_INDICES = "all_indices"
 UNIVERSE_SP500 = "sp500"
 UNIVERSE_NDX = "ndx"
 UNIVERSE_DJ30 = "dj30"
+UNIVERSE_R1000 = "r1000"
+UNIVERSE_R2000 = "r2000"
 UNIVERSE_CUSTOM = "custom"
 UNIVERSE_WATCHLIST = "watchlist"
 
 UNIVERSE_LABELS: dict[str, str] = {
-    UNIVERSE_ALL_INDICES: "All indices (S&P 500 + NASDAQ-100 + Dow 30)",
+    UNIVERSE_ALL_INDICES: (
+        "All indices (S&P 500 + NASDAQ-100 + Dow 30 + Russell 1000 + Russell 2000)"
+    ),
     UNIVERSE_SP500: "S&P 500",
     UNIVERSE_NDX: "NASDAQ-100",
     UNIVERSE_DJ30: "Dow 30",
+    UNIVERSE_R1000: "Russell 1000",
+    UNIVERSE_R2000: "Russell 2000",
     UNIVERSE_CUSTOM: "Custom screener",
     UNIVERSE_WATCHLIST: "My watchlist",
 }
 
-INDEX_CODES = (UNIVERSE_SP500, UNIVERSE_NDX, UNIVERSE_DJ30)
+INDEX_CODES = (
+    UNIVERSE_SP500, UNIVERSE_NDX, UNIVERSE_DJ30, UNIVERSE_R1000, UNIVERSE_R2000,
+)
 
 # EODHD index symbols. Constituents fetched via the fundamentals endpoint
-# (`/fundamentals/{symbol}.INDX`). Replaces the earlier Wikipedia scrape: same
-# output shape, but it's a single first-party API, no UA/HTML brittleness, and
-# membership stays in sync with whatever EODHD's screener thinks "US" means.
+# (`/fundamentals/{symbol}.INDX`). Verified live: GSPC=503, NDX=101, DJI=30,
+# RUI=981 (Russell 1000), RUT=1963 (Russell 2000). RUA (R3000) returns 0
+# components on the All-In-One plan, so we union RUI+RUT to cover R3000.
 EODHD_INDEX_SYMBOLS: dict[str, str] = {
     UNIVERSE_SP500: "GSPC",
     UNIVERSE_NDX:   "NDX",
     UNIVERSE_DJ30:  "DJI",
+    UNIVERSE_R1000: "RUI",
+    UNIVERSE_R2000: "RUT",
 }
 
 # ---------- screener tiers ----------
@@ -118,7 +128,13 @@ async def ensure_index_members(
     if age is None or age > INDEX_CACHE_TTL:
         try:
             raw = await client.index_constituents(EODHD_INDEX_SYMBOLS[index_code])
-            min_expected = {UNIVERSE_SP500: 400, UNIVERSE_NDX: 80, UNIVERSE_DJ30: 20}
+            min_expected = {
+                UNIVERSE_SP500: 400,
+                UNIVERSE_NDX: 80,
+                UNIVERSE_DJ30: 20,
+                UNIVERSE_R1000: 800,
+                UNIVERSE_R2000: 1500,
+            }
             if len(raw) >= min_expected[index_code]:
                 rows = [
                     {"ticker": _normalize_ticker(r["code"]), "company_name": r.get("name")}

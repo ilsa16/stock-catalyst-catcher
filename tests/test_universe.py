@@ -13,6 +13,8 @@ from src.universe import (
     UNIVERSE_ALL_INDICES,
     UNIVERSE_CUSTOM,
     UNIVERSE_LABELS,
+    UNIVERSE_R1000,
+    UNIVERSE_R2000,
     UNIVERSE_SP500,
     UNIVERSE_WATCHLIST,
     ensure_index_members,
@@ -208,6 +210,50 @@ async def test_resolve_union_across_users(db, client):
     assert set(union) == {"AAPL.US", "MSFT.US", "TSLA.US"}
 
 
+@pytest.mark.asyncio
+async def test_resolve_user_universe_russell_2000(db, client):
+    """Russell 2000 (RUT.INDX) is fetched the same way as SP500."""
+    sym = EODHD_INDEX_SYMBOLS[UNIVERSE_R2000]
+    rows = [(f"R{i:04d}", f"Co {i}") for i in range(1700)]
+    with respx.mock() as mock:
+        mock.get(f"{BASE_URL}/fundamentals/{sym}.INDX").mock(
+            return_value=httpx.Response(200, json=_eodhd_components_payload(rows))
+        )
+        tickers = await resolve_user_universe(
+            db, client,
+            choice=UNIVERSE_R2000, tier="default", chat_id=1,
+        )
+    assert len(tickers) == 1700
+
+
+@pytest.mark.asyncio
+async def test_all_indices_includes_russell_universes(db, client):
+    """The all_indices choice should union SP500 + NDX + DJ30 + R1000 + R2000
+    after the Russell additions."""
+    # Seed cached members so we don't need to mock 5 HTTP calls.
+    await db.replace_index_members(
+        "sp500", [{"ticker": "AAPL.US", "company_name": None}]
+    )
+    await db.replace_index_members(
+        "ndx", [{"ticker": "NVDA.US", "company_name": None}]
+    )
+    await db.replace_index_members(
+        "dj30", [{"ticker": "MMM.US", "company_name": None}]
+    )
+    await db.replace_index_members(
+        "r1000", [{"ticker": "AIZ.US", "company_name": None}]
+    )
+    await db.replace_index_members(
+        "r2000", [{"ticker": "VABK.US", "company_name": None}]
+    )
+
+    result = await resolve_user_universe(
+        db, client,
+        choice=UNIVERSE_ALL_INDICES, tier="default", chat_id=1,
+    )
+    assert set(result) == {"AAPL.US", "NVDA.US", "MMM.US", "AIZ.US", "VABK.US"}
+
+
 # ---------- sanity ----------
 
 def test_universe_labels_cover_all_choices():
@@ -221,6 +267,15 @@ def test_universe_labels_cover_all_choices():
 def test_eodhd_index_symbols_cover_all_index_codes():
     for code in INDEX_CODES:
         assert code in EODHD_INDEX_SYMBOLS
+
+
+def test_russell_indices_in_index_codes():
+    # Regression: if someone removes them, the all_indices union shrinks
+    # silently back to ~516 names. Pin both as part of the canonical set.
+    assert UNIVERSE_R1000 in INDEX_CODES
+    assert UNIVERSE_R2000 in INDEX_CODES
+    assert EODHD_INDEX_SYMBOLS[UNIVERSE_R1000] == "RUI"
+    assert EODHD_INDEX_SYMBOLS[UNIVERSE_R2000] == "RUT"
 
 
 def test_screener_tiers_cover_ranges():
