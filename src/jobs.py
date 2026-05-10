@@ -14,12 +14,32 @@ from config import Settings
 from .db import Database
 from .eodhd_client import EODHDClient
 from .formatter import render_digest
-from .scanner import GapHit, scan_universe
+from .scanner import GAP_VS_PREV_CLOSE, GAP_VS_TODAY_OPEN, GapHit, scan_universe
 from .universe import resolve_union_for_users, resolve_user_universe
 
 log = logging.getLogger(__name__)
 
 _NYC = ZoneInfo("America/New_York")
+
+
+def _gap_baseline_for(scan_time_local: datetime) -> str:
+    """
+    Pick the gap denominator based on which US session the scan is happening in.
+
+      - 09:30–16:00 ET (regular session) → today's open. The trader-conventional
+        "intraday gap" that surfaces breakouts during the day.
+      - any other time (pre-market / post-market / overnight) → previous regular
+        close. Captures overnight news gappers in pre-market and total-day
+        moves in post-market.
+
+    Auto-selection means a /run_now at 11 AM ET measures intraday breakouts off
+    today's open without the user having to flip a flag.
+    """
+    et = scan_time_local.astimezone(_NYC)
+    minutes = et.hour * 60 + et.minute
+    if 9 * 60 + 30 <= minutes < 16 * 60:
+        return GAP_VS_TODAY_OPEN
+    return GAP_VS_PREV_CLOSE
 
 
 def _ws_collect_seconds_for(scan_time_local: datetime, settings: Settings) -> float:
@@ -119,6 +139,7 @@ async def daily_scan(
         tz = ZoneInfo(settings.scan_timezone)
         scan_local = datetime.now(tz)
         ws_seconds = _ws_collect_seconds_for(scan_local, settings)
+        gap_baseline = _gap_baseline_for(scan_local)
 
         hits: list[GapHit] = (
             await scan_universe(
@@ -126,6 +147,7 @@ async def daily_scan(
                 max_age_seconds=settings.max_hit_age_hours * 3600,
                 ws_collect_seconds=ws_seconds,
                 ws_api_key=settings.eodhd_api_key if ws_seconds > 0 else None,
+                gap_baseline=gap_baseline,
             )
             if tickers else []
         )

@@ -20,7 +20,16 @@ ETH_FRESH_SECONDS = 6 * 3600
 # dropped from the digest — stops the bot re-emitting yesterday's gaps as if
 # they're new. Caller (scan_universe) can override per-call; the default of 12h
 # is set so a /run_now run during late post-market still shows that day's close.
-DEFAULT_MAX_HIT_AGE_SECONDS = 12 * 3600
+DEFAULT_MAX_HIT_AGE_SECONDS = 24 * 3600
+
+# Gap baseline: which "starting price" to compute the gap percentage against.
+#   GAP_VS_PREV_CLOSE — current price vs yesterday's regular-session close.
+#     Captures overnight gappers in pre-market and total-day moves in post-market.
+#   GAP_VS_TODAY_OPEN — current price vs today's regular-session open. The
+#     trader-conventional "intraday gap": how much the stock has moved since
+#     today's open print. Used during regular hours to surface intraday breakouts.
+GAP_VS_PREV_CLOSE = "vs_prev_close"
+GAP_VS_TODAY_OPEN = "vs_today_open"
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,7 @@ def parse_quote(
     *,
     now: float | None = None,
     max_age_seconds: int | None = None,
+    gap_baseline: str = GAP_VS_PREV_CLOSE,
 ) -> GapHit | None:
     """
     Parse one Live v2 (us-quote-delayed) row into a GapHit, or None if invalid,
@@ -87,9 +97,12 @@ def parse_quote(
         within ETH_FRESH_SECONDS *and* more recent than the latest regular print.
         That makes pre-market/post-market scans use eth and regular-hours scans
         use the live regular session, automatically.
-      - gap_pct is always (price - prior_close) / prior_close * 100; we don't
-        trust the API's `change_p` / `changePercent` — its denominator varies
-        per row in observed responses.
+      - gap_pct denominator is selected by `gap_baseline`:
+          GAP_VS_PREV_CLOSE → previousClosePrice (yesterday's regular close)
+          GAP_VS_TODAY_OPEN → today's open price; falls back to previousClose
+                              when open isn't populated (early pre-market).
+        We don't trust the API's `change_p` / `changePercent` — its denominator
+        varies per row in observed responses.
       - Falls back to the older /real-time response shape (`close`,
         `previousClose`, seconds-resolution `timestamp`) so that historic
         respx fixtures and any cached payloads still parse.
@@ -102,8 +115,13 @@ def parse_quote(
     if not code:
         return None
 
-    prior = _to_float(raw.get("previousClosePrice") or raw.get("previousClose"))
-    if prior is None or prior <= 0:
+    prev_close = _to_float(raw.get("previousClosePrice") or raw.get("previousClose"))
+    today_open = _to_float(raw.get("open"))
+    if gap_baseline == GAP_VS_TODAY_OPEN and today_open is not None and today_open > 0:
+        baseline = today_open
+    else:
+        baseline = prev_close
+    if baseline is None or baseline <= 0:
         return None
 
     now_s = now if now is not None else time.time()
@@ -141,7 +159,7 @@ def parse_quote(
         ts = reg_time_ms // 1000 if reg_time_ms is not None else None
         source = "regular"
 
-    gap_pct = (price - prior) / prior * 100.0
+    gap_pct = (price - baseline) / baseline * 100.0
     if gap_pct < ABSOLUTE_GAP_FLOOR:
         return None
 
@@ -152,7 +170,7 @@ def parse_quote(
     return GapHit(
         ticker=code,
         price=price,
-        prior_close=prior,
+        prior_close=baseline,
         gap_pct=gap_pct,
         timestamp=ts,
         source=source,
@@ -195,6 +213,7 @@ async def scan_universe(
     max_age_seconds: int | None = DEFAULT_MAX_HIT_AGE_SECONDS,
     ws_collect_seconds: float = 0.0,
     ws_api_key: str | None = None,
+    gap_baseline: str = GAP_VS_PREV_CLOSE,
 ) -> list[GapHit]:
     """
     Pull batched Live v2 quotes for `tickers`, parse, filter to
@@ -231,7 +250,9 @@ async def scan_universe(
 
     hits: list[GapHit] = []
     for q in raw_quotes:
-        hit = parse_quote(q, max_age_seconds=max_age_seconds)
+        hit = parse_quote(
+            q, max_age_seconds=max_age_seconds, gap_baseline=gap_baseline,
+        )
         if hit is not None:
             hits.append(hit)
 
