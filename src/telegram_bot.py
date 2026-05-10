@@ -81,9 +81,10 @@ def _universe_keyboard(current: str) -> InlineKeyboardMarkup:
         return InlineKeyboardButton(f"{marker}{label}", callback_data=f"univ:{key}")
 
     rows = [
-        [b("all_indices", "All indices")],
+        [b("all_indices", "All indices (~2.5k)")],
         [b("sp500", "S&P 500"), b("ndx", "NASDAQ-100")],
-        [b("dj30", "Dow 30"), b("custom", "Custom screener")],
+        [b("dj30", "Dow 30"), b("r1000", "Russell 1000")],
+        [b("r2000", "Russell 2000"), b("custom", "Custom screener")],
         [b("watchlist", "My watchlist")],
     ]
     return InlineKeyboardMarkup(rows)
