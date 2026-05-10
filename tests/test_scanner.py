@@ -1,6 +1,10 @@
+import time
+
 from src.scanner import (
     DEFAULT_MAX_HIT_AGE_SECONDS,
     ETH_FRESH_SECONDS,
+    GAP_VS_PREV_CLOSE,
+    GAP_VS_TODAY_OPEN,
     GapHit,
     parse_quote,
 )
@@ -125,7 +129,7 @@ def test_parse_quote_drops_stale_hits_when_max_age_set():
     from re-emitting yesterday's regular close as a "new" gap during a late
     /run_now."""
     now = 1_700_000_000.0
-    stale_ms = int((now - 13 * 3600) * 1000)  # 13h ago, > default 12h
+    stale_ms = int((now - 30 * 3600) * 1000)  # 30h ago, > default 24h
     fresh_ms = int((now - 30 * 60) * 1000)    # 30 min ago, fresh
 
     stale_quote = {
@@ -154,6 +158,59 @@ def test_parse_quote_drops_stale_hits_when_max_age_set():
     )
     assert fresh_hit is not None
     assert fresh_hit.ticker == "NEW.US"
+
+
+def test_parse_quote_default_baseline_is_prev_close():
+    """Without an explicit gap_baseline, gap is computed against previousClose."""
+    hit = parse_quote({
+        "code": "X.US",
+        "previousClosePrice": 100.0,
+        "open": 105.0,        # would give a smaller gap if used as baseline
+        "lastTradePrice": 110.0,
+        "lastTradeTime": int(time.time() * 1000),
+    })
+    assert hit is not None
+    # +10% from 100, not +4.76% from 105
+    assert abs(hit.gap_pct - 10.0) < 0.01
+    assert hit.prior_close == 100.0
+
+
+def test_parse_quote_today_open_baseline_uses_open():
+    """gap_baseline=GAP_VS_TODAY_OPEN gives the trader-conventional intraday
+    gap: current price relative to today's open. From prev_close the same row
+    would compute +15% (and hit), so this proves the baseline switch works."""
+    hit = parse_quote(
+        {
+            "code": "X.US",
+            "previousClosePrice": 100.0,
+            "open": 105.0,
+            "lastTradePrice": 115.0,
+            "lastTradeTime": int(time.time() * 1000),
+        },
+        gap_baseline=GAP_VS_TODAY_OPEN,
+    )
+    assert hit is not None
+    # 115 vs 105 = +9.52%, above 5% floor. From prev_close it would be +15%.
+    assert 9.0 < hit.gap_pct < 10.0
+    assert hit.prior_close == 105.0
+
+
+def test_parse_quote_today_open_falls_back_to_prev_close_when_open_missing():
+    """Early pre-market: today's open hasn't printed yet. Falls back to
+    previousClose so the hit doesn't get silently dropped."""
+    hit = parse_quote(
+        {
+            "code": "X.US",
+            "previousClosePrice": 100.0,
+            "open": None,
+            "lastTradePrice": 110.0,
+            "lastTradeTime": int(time.time() * 1000),
+        },
+        gap_baseline=GAP_VS_TODAY_OPEN,
+    )
+    assert hit is not None
+    assert abs(hit.gap_pct - 10.0) < 0.01
+    assert hit.prior_close == 100.0
 
 
 def test_parse_quote_strips_autolink_artifact_in_ticker():

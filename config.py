@@ -18,12 +18,15 @@ class Settings(BaseSettings):
 
     default_gap_threshold: float = 5.0
 
-    # Drop hits whose latest trade is older than this many hours. EODHD's
-    # delayed feeds don't always serve fresh post-market data, so this stops
-    # the bot re-emitting yesterday's regular close as if it were live.
-    # Default 12h: long enough that a /run_now during late post-market still
-    # surfaces that day's close; short enough that yesterday's gaps are gone.
-    max_hit_age_hours: int = 12
+    # Drop hits whose latest trade is older than this many hours.
+    # 24h is tuned to keep "yesterday's post-market gappers that haven't traded
+    # yet this pre-market" alive. At 04:30 ET pre-market, a stock whose only
+    # recent print is yesterday's 16:14 ET post-market trade is ~12.25h old —
+    # at the previous 12h default it was being silently dropped, which is why
+    # pre-market scans came up empty even on days with obvious gappers.
+    # The freshness is still surfaced per-hit via the `(HH:MM EDT)` suffix and
+    # the "Markets closed" header note when applicable.
+    max_hit_age_hours: int = 24
 
     # WebSocket trade-stream listening window for pre-/post-market scans.
     # 0 disables the WS overlay entirely (HTTP-only, current behavior).
