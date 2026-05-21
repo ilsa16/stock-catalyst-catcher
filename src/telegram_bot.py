@@ -96,7 +96,9 @@ def _screener_keyboard(current: str) -> InlineKeyboardMarkup:
         label = SCREENER_TIERS[key]["label"]
         return InlineKeyboardButton(f"{marker}{label}", callback_data=f"tier:{key}")
 
-    rows = [[b(k)] for k in ("default", "large_cap", "broad", "penny_friendly")]
+    rows = [[b(k)] for k in (
+        "mega_cap", "default", "large_cap", "broad", "penny_friendly",
+    )]
     return InlineKeyboardMarkup(rows)
 
 
@@ -129,9 +131,10 @@ def _universe_text(current: str) -> str:
 
 def _screener_text(current: str) -> str:
     return (
-        "*Custom screener tier*\n"
+        "*Screener tier*\n"
         f"Current: {escape_md_v2(SCREENER_TIERS[current]['label'])}\n"
-        "_Used when your universe is set to Custom screener\\._\n"
+        "_Applied as a quality filter on every universe except Watchlist —"
+        " hits below the price / market\\-cap / ADV floor are dropped\\._\n"
         "Tap an option to change:"
     )
 

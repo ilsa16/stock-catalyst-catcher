@@ -54,16 +54,40 @@ EODHD_INDEX_SYMBOLS: dict[str, str] = {
 
 # ---------- screener tiers ----------
 
+# Screener tiers act as a post-filter on whatever universe the user picks
+# (everything except Watchlist — that one's an explicit list and stays as-is).
+#
+# Conservative → aggressive. Each tier is meaningfully distinct on at least
+# two of three axes (MCap, price, ADV) so picking the next tier actually
+# changes what surfaces. Keys are stable for DB compatibility.
+#
+# Approximate coverage on Russell 3000:
+#   mega_cap:        ~50 names    (largest, most liquid)
+#   default:         ~600 names   (S&P 500 range)
+#   large_cap:       ~1,400 names (mid-cap and up with real volume)
+#   broad:           ~2,200 names (small-cap with at least decent liquidity)
+#   penny_friendly:  ~2,500 names (small/micro-cap momentum, $2+ only)
 SCREENER_TIERS: dict[str, dict[str, Any]] = {
+    "mega_cap": {
+        "label": "Mega-cap — MCap >$200B, Price >$20, ADV >1M",
+        "market_cap_min": 200_000_000_000,
+        "price_min": 20.0,
+        "avg_vol_min": 1_000_000,
+    },
     "default": {
-        "label": "Default — MCap >$1B, Price >$10, ADV >100k",
-        "market_cap_min": 1_000_000_000,
+        # Tighter than the v1 default (was MCap >$1B / ADV >100k).
+        # Aligns with "S&P 500 / well-followed names" and filters out the
+        # micro-cap noise that was slipping through on the Russell 2000.
+        "label": "Standard — MCap >$10B, Price >$10, ADV >500k",
+        "market_cap_min": 10_000_000_000,
         "price_min": 10.0,
-        "avg_vol_min": 100_000,
+        "avg_vol_min": 500_000,
     },
     "large_cap": {
-        "label": "Large-cap — MCap >$10B, Price >$10, ADV >500k",
-        "market_cap_min": 10_000_000_000,
+        # Re-cast as "mid-cap and up" — drops MCap floor to $2B but keeps
+        # price/ADV reasonable. Useful as a step down from `default`.
+        "label": "Mid-cap+ — MCap >$2B, Price >$10, ADV >500k",
+        "market_cap_min": 2_000_000_000,
         "price_min": 10.0,
         "avg_vol_min": 500_000,
     },
@@ -74,9 +98,11 @@ SCREENER_TIERS: dict[str, dict[str, Any]] = {
         "avg_vol_min": 500_000,
     },
     "penny_friendly": {
-        "label": "Penny-friendly — MCap >$100M, Price >$1, ADV >1M",
+        # Price floor bumped $1 → $2. Sub-$1 was attracting too many
+        # pump-and-dump candidates with very wide bid/ask.
+        "label": "Small-cap momentum — MCap >$100M, Price >$2, ADV >1M",
         "market_cap_min": 100_000_000,
-        "price_min": 1.0,
+        "price_min": 2.0,
         "avg_vol_min": 1_000_000,
     },
 }

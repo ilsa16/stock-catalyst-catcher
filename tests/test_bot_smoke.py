@@ -117,7 +117,7 @@ def test_universe_panel_text_is_valid_md_v2():
 
 
 def test_screener_panel_text_is_valid_md_v2():
-    for tier in ("default", "large_cap", "broad", "penny_friendly"):
+    for tier in ("mega_cap", "default", "large_cap", "broad", "penny_friendly"):
         _check_md_v2_balanced(_screener_text(tier))
 
 
@@ -270,3 +270,104 @@ async def test_daily_scan_only_chat_id_sends_one_digest(db, client, settings):
     assert sent[0]["chat_id"] == 42
     assert "AAPL" in sent[0]["text"]
     assert "10\\.00%" in sent[0]["text"] or "+10\\.00%" in sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_tier_filter_drops_under_price_floor_on_index_universe(
+    db, client, settings,
+):
+    """
+    Reproduces the May-20 bug: user on 'all_indices' with screener_tier=
+    'large_cap' was seeing $0.68 names because the tier filter only fired
+    when universe=custom. After the fix the per-user filter applies to
+    every universe except watchlist, so the sub-$10 name is dropped.
+    """
+    await db.upsert_user(chat_id=99, username=None, default_threshold=3.0)
+    await db.set_universe_choice(99, "sp500")  # any index universe will do
+    await db.set_screener_tier(99, "large_cap")  # price_min=10, mcap_min=2B
+    # Seed the index_members so resolve_user_universe returns these two.
+    await db.replace_index_members("sp500", [
+        {"ticker": "BIG.US", "company_name": "Big Co"},
+        {"ticker": "TINY.US", "company_name": "Tiny Co"},
+    ])
+
+    quotes = [
+        {  # passes: price $50, MCap $50B, ADV 2M, gap +8%
+            "code": "BIG.US",
+            "previousClosePrice": 46.30,
+            "lastTradePrice": 50.0,
+            "lastTradeTime": int(__import__("time").time() * 1000),
+            "marketCap": 50_000_000_000,
+            "averageVolume": 2_000_000,
+        },
+        {  # tier rejects: $0.68 < $10 price floor (and tiny MCap)
+            "code": "TINY.US",
+            "previousClosePrice": 0.58,
+            "lastTradePrice": 0.68,
+            "lastTradeTime": int(__import__("time").time() * 1000),
+            "marketCap": 50_000_000,
+            "averageVolume": 1_500_000,
+        },
+    ]
+    client.live_batch = AsyncMock(return_value=quotes)  # type: ignore[method-assign]
+
+    sent: list[dict] = []
+
+    async def fake_send_message(chat_id, text, **kw):
+        sent.append({"chat_id": chat_id, "text": text})
+        m = MagicMock()
+        m.message_id = len(sent)
+        return m
+
+    bot = MagicMock()
+    bot.send_message = fake_send_message
+
+    result = await daily_scan(
+        db, client, bot, settings,
+        scan_type="premarket", only_chat_id=99,
+    )
+    assert result["status"] == "ok", result.get("error")
+    # Both are above ABSOLUTE_GAP_FLOOR=5%, but TINY should be tier-filtered.
+    assert result["hits_count"] == 2  # scan_universe returns both
+    # The user's digest should only mention BIG.
+    body = sent[0]["text"]
+    assert "BIG" in body
+    assert "TINY" not in body
+
+
+@pytest.mark.asyncio
+async def test_tier_filter_skipped_for_watchlist(db, client, settings):
+    """Watchlist is explicit user choice — tier filter doesn't apply, so
+    sub-$10 names the user added stay visible."""
+    await db.upsert_user(chat_id=100, username=None, default_threshold=3.0)
+    await db.set_universe_choice(100, "watchlist")
+    await db.set_screener_tier(100, "large_cap")  # would filter $0.68 if applied
+    await db.add_watch(100, "TINY.US", "Tiny Co")
+
+    quote = {
+        "code": "TINY.US",
+        "previousClosePrice": 0.58,
+        "lastTradePrice": 0.68,
+        "lastTradeTime": int(__import__("time").time() * 1000),
+        "marketCap": 50_000_000,
+        "averageVolume": 1_500_000,
+    }
+    client.live_batch = AsyncMock(return_value=[quote])  # type: ignore[method-assign]
+
+    sent: list[dict] = []
+
+    async def fake_send_message(chat_id, text, **kw):
+        sent.append({"chat_id": chat_id, "text": text})
+        m = MagicMock()
+        m.message_id = len(sent)
+        return m
+
+    bot = MagicMock()
+    bot.send_message = fake_send_message
+
+    await daily_scan(
+        db, client, bot, settings,
+        scan_type="premarket", only_chat_id=100,
+    )
+    assert len(sent) == 1
+    assert "TINY" in sent[0]["text"]

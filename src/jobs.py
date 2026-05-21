@@ -15,7 +15,12 @@ from .db import Database
 from .eodhd_client import EODHDClient
 from .formatter import render_digest
 from .scanner import GAP_VS_PREV_CLOSE, GAP_VS_TODAY_OPEN, GapHit, scan_universe
-from .universe import resolve_union_for_users, resolve_user_universe
+from .universe import (
+    SCREENER_TIERS,
+    UNIVERSE_WATCHLIST,
+    resolve_union_for_users,
+    resolve_user_universe,
+)
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +175,20 @@ async def daily_scan(
                 h for h in hits
                 if h.ticker in user_universe and h.gap_pct >= user["gap_threshold"]
             ]
+            # Apply the user's screener tier as a post-filter on top of any
+            # universe choice except Watchlist. Watchlist is an explicit user
+            # list — they want every name in it regardless of MCap/price/ADV.
+            # For everything else (all_indices, sp500, ndx, dj30, r1000, r2000,
+            # custom), the tier acts as a quality gate so e.g. "Large-cap"
+            # actually drops sub-$10 names when scanning the Russell 2000.
+            if user["universe_choice"] != UNIVERSE_WATCHLIST:
+                tier_spec = SCREENER_TIERS.get(user["screener_tier"]) or SCREENER_TIERS["default"]
+                user_hits = [
+                    h for h in user_hits
+                    if h.price >= tier_spec["price_min"]
+                    and (h.market_cap or 0) >= tier_spec["market_cap_min"]
+                    and (h.avg_volume or 0) >= tier_spec["avg_vol_min"]
+                ]
             per_user_hits.append((user, user_hits))
             if user["news_enabled"]:
                 news_needed.update(h.ticker for h in user_hits)

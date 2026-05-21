@@ -40,6 +40,11 @@ class GapHit:
     gap_pct: float
     timestamp: int | None  # epoch seconds, may be None
     source: str  # "extended" | "regular"
+    # Extracted from the quote response; carried through so the per-user
+    # filter in jobs.daily_scan can apply the screener tier on top of any
+    # universe (not just Custom). None when EODHD didn't return the field.
+    market_cap: float | None = None
+    avg_volume: float | None = None
 
     @property
     def display_ticker(self) -> str:
@@ -174,6 +179,8 @@ def parse_quote(
         gap_pct=gap_pct,
         timestamp=ts,
         source=source,
+        market_cap=_to_float(raw.get("marketCap")),
+        avg_volume=_to_float(raw.get("averageVolume")),
     )
 
 
