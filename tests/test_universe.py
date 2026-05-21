@@ -280,6 +280,14 @@ def test_russell_indices_in_index_codes():
 
 def test_screener_tiers_cover_ranges():
     keys = set(SCREENER_TIERS.keys())
-    assert {"default", "large_cap", "broad", "penny_friendly"} <= keys
-    assert SCREENER_TIERS["penny_friendly"]["price_min"] == 1.0
-    assert SCREENER_TIERS["default"]["market_cap_min"] == 1_000_000_000
+    # All five tiers exist and the keys are stable for DB compatibility.
+    assert {"mega_cap", "default", "large_cap", "broad", "penny_friendly"} <= keys
+    # Tightened bounds (see SCREENER_TIERS docstring):
+    # penny_friendly price floor bumped $1 → $2 to drop pump-and-dump territory.
+    assert SCREENER_TIERS["penny_friendly"]["price_min"] == 2.0
+    # default tightened MCap $1B → $10B for actual large-cap quality.
+    assert SCREENER_TIERS["default"]["market_cap_min"] == 10_000_000_000
+    # Tiers progress monotonically on MCap (mega → default → large_cap → broad → penny).
+    mcaps = [SCREENER_TIERS[k]["market_cap_min"]
+             for k in ("mega_cap", "default", "large_cap", "broad", "penny_friendly")]
+    assert mcaps == sorted(mcaps, reverse=True)
